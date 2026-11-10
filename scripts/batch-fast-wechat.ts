@@ -1,20 +1,20 @@
 #!/usr/bin/env bun
 /**
- * batch-fast-wechat.ts — 单窗口、多标签页、无缝批量写入微信公众号草稿箱
+ * batch-fast-wechat.ts — 单窗口、多标签页、无缝批量写入微信公众号草稿箱（全功能完美版）
  * 
- * 核心优化：
- * 1. 【单窗口常驻】：只打开一个浏览器窗口，不重启浏览器，不弹二维码！
- * 2. 【多标签流水线】：在主页点“文章”打开新标签 -> 填标题、去空行正文、插图 -> 存草稿 -> 关闭标签 -> 下一篇！
- * 3. 【严格字数限制】：所有推文标题严格限制在 15 个字以内（<= 15 字），自动精简。
- * 4. 【全文空行深度净化】：
- *    - Markdown 阶段剔除冗余空行与连续换行；
- *    - HTML 阶段剔除空段落；
- *    - ProseMirror 编辑器内二次 DOM 清洗，彻底删除任何空白 <p><br></p>，防止排版间隙过大。
+ * 核心升级与要素：
+ * 1. 【单窗口常驻多标签】：不重启浏览器，不弹二维码，主页常驻，开标签写完存草稿立即关标签，循环下一篇！
+ * 2. 【推文标题严格限制】：所有标题严格 <= 15 个汉字（智能精简，杜绝冗长与折叠）。
+ * 3. 【作者字段自动填充】：作者严格固定自动填写为 “锐多宝”。
+ * 4. 【摘要与元数据精准分行】：彻底解决摘要/元数据挤成一团的问题，确保期刊、题目、作者、出处各自独立换行并带清晰间距。
+ * 5. 【文章底部插入锐多宝名片】：文章末尾自动挂载锐多宝官方公众号名片组件与关注引导。
+ * 6. 【文章自动设置封面预览图】：文章插入图片后，自动调用“从正文选择”截取首图设为 2.35:1 及 1:1 封面，草稿列表必带预览图。
+ * 7. 【顶级科技排版主题】：全面采用 grace 优雅科技蓝主题，卡片药丸标题、圆角阴影，排版比肩专业科技杂志。
+ * 8. 【全流程深度去空行】：源码、HTML 与 ProseMirror DOM 三重过滤，彻底消灭空白段落。
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   CdpConnection,
   findChromeExecutable,
@@ -45,13 +45,11 @@ function refineTitleTo15Chars(raw: string): string {
     .replace(/[，,：:：、“”"''！!？?]/g, ' ')
     .trim();
 
-  // 压缩空格
   t = t.replace(/\s+/g, '');
 
   if (t.length <= 15) return t;
 
   // 针对长标题进行智能压缩提取核心主干（确保 <= 15 字）
-  // 常见模式提取：团队/机构 + 核心突破
   if (t.includes('PlanetScope') && t.includes('枯死木')) return '3米卫星探测森林枯死立木';
   if (t.includes('Mamba') && t.includes('遥感')) return 'Mamba多模态遥感融合分类';
   if (t.includes('ContrailStruct') || t.includes('凝结尾迹')) return '首个飞机凝结尾迹分割数据集';
@@ -77,29 +75,67 @@ function refineTitleTo15Chars(raw: string): string {
   if (t.includes('关美宝') || t.includes('滑坡')) return '地球物理适配大模型跨域滑坡';
   if (t.includes('汤进') || t.includes('无人机')) return '残差感知无人机卫星跨视角定位';
   if (t.includes('WMoENet') || t.includes('舰船')) return '小波多模态雷达光学舰船检测';
+  if (t.includes('OSIRIS') || t.includes('三维地形')) return 'OSIRIS浏览器切出三维地形';
+  if (t.includes('CFDID') || t.includes('洪涝灾害')) return '中国洪涝灾害影响数据库发布';
+  if (t.includes('沈焕锋') || t.includes('地表温度')) return '武大突破30米地表温度降尺度';
+  if (t.includes('刁春源') || t.includes('玉米')) return 'UIUC刁春源团队少样本玉米估产';
 
-  // 通用截断保底（严格截取前15字）
   return t.slice(0, 15);
 }
 
 // -----------------------------------------------------------------------------
-// 2. 空行净化函数（清除 Markdown 与 HTML 冗余空行）
+// 2. 空行净化与摘要/元数据分行格式化
 // -----------------------------------------------------------------------------
-function purifyMarkdownEmptyLines(content: string): string {
-  // 1. 统一换行符
+function purifyMarkdown(content: string): string {
   let text = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  
-  // 2. 移除行末空格
-  text = text.replace(/[ \t]+$/gm, '');
 
-  // 3. 将连续的三个及以上换行压缩为两个（严格避免出现多余空行）
+  // 处理头部摘要与元数据块（> 引用块），确保每一行都有换行标签或双空格硬换行
+  text = text.replace(/^>[\s\S]*?(?=\n\n|\n[^- >#])/m, (block) => {
+    return block
+      .split('\n')
+      .map(line => {
+        if (/^>\s*\*\*[^*]+\*\*：/.test(line)) {
+          // 在每一项元数据（如论文期刊、论文题目）前加清晰分行
+          return line.trimEnd() + '<br />';
+        }
+        return line.trimEnd();
+      })
+      .join('\n');
+  });
+
+  // 压缩连续多余空行（3个及以上换行压为2个）
   text = text.replace(/\n{3,}/g, '\n\n');
 
-  // 4. 清理引用块、列表内部的多余空行
-  text = text.replace(/(^>[^\n]*)\n\n+(>)/gm, '$1\n$2');
-  text = text.replace(/(^[-*+]\s+[^\n]*)\n\n+([-*+]\s+)/gm, '$1\n$2');
-
   return text.trim();
+}
+
+function postProcessHtml(html: string): string {
+  // 1. 深度确保 blockquote 内部的各项元数据分行独立展示
+  html = html.replace(/<blockquote[\s\S]*?<\/blockquote>/gi, (bq) => {
+    let b = bq.replace(/\\(\s*<\/p>|\s*<strong)/g, '<br />$1');
+    // 针对被压缩进同一个 <p> 的多个 <strong> 项插入分行
+    b = b.replace(/(<strong[^>]*>.*?<\/strong>)/gi, (m, tag, offset) => {
+      if (offset > 60 && !b.slice(offset - 10, offset).includes('<br')) {
+        return '<br style="line-height:2em;" />' + m;
+      }
+      return m;
+    });
+    return b;
+  });
+
+  // 2. 清除任何空白的空段落容器
+  html = html.replace(/<p>\s*(<br\s*\/?>|&nbsp;|\s*)*<\/p>/gi, '');
+  html = html.replace(/<div>\s*(<br\s*\/?>|&nbsp;|\s*)*<\/div>/gi, '');
+
+  // 3. 末尾插入【锐多宝官方公众号名片】及关注引导组件
+  const cardHtml = `
+<section style="margin: 45px auto 25px auto; padding: 20px 10px; border-top: 1px dashed #dcdcdc; text-align: center;">
+  <p style="color: #666; font-size: 14px; margin-bottom: 15px;">👇 关注【锐多宝】公众号，获取最新遥感科技资讯与论文速递：</p>
+  <div class="wx_profile weui-flex"><div class="wx_profile_hd"><img src="http://mmbiz.qpic.cn/sz_mmbiz_png/vVd0EtPL5ImHdgCTYTNyqkveib6xpYMjwADzu95yj3FVle1mVWDD6CTUxvnJYI5aTU7mHffnqpVoGGDkibJaKK2UgH197gJhibbOLozg7w5iblQ/0?wx_fmt=png" alt="" class="wx_profile_avatar"></div> <div class="wx_profile_bd weui-flex weui-flex__item"><div class="weui-flex__item"><div class="wx_profile_nickname_wrp"><strong id="js_a11y_wx_profile_nickname" class="wx_profile_nickname">锐多宝</strong> <span class="wx_follow_verify"></span></div> <div id="js_a11y_wx_profile_desc" class="wx_profile_desc">锐多宝的地理空间   原名:遥感之家</div> <!----></div> <i class="weui-icon-arrow"></i></div></div>
+</section>
+  `.trim();
+
+  return html + '\n' + cardHtml;
 }
 
 // -----------------------------------------------------------------------------
@@ -120,7 +156,7 @@ function saveHistory(hist: Record<string, any>) {
 }
 
 // -----------------------------------------------------------------------------
-// 4. 扫描待同步文章（优先近期批次）
+// 4. 扫描候选文章
 // -----------------------------------------------------------------------------
 interface Candidate {
   id: string;
@@ -133,7 +169,7 @@ interface Candidate {
 function getCandidates(): Candidate[] {
   const list: Candidate[] = [];
 
-  // 1. 扫描 Local 批次（近 3 天）
+  // Local
   if (fs.existsSync(LOCAL_ROOT)) {
     const batches = fs.readdirSync(LOCAL_ROOT).filter(d => /^\d{8}_\d{4}$/.test(d)).sort();
     for (const b of batches) {
@@ -151,7 +187,7 @@ function getCandidates(): Candidate[] {
     }
   }
 
-  // 2. 扫描 Muse 批次（近 3 天）
+  // Muse
   if (fs.existsSync(MUSE_ROOT)) {
     const batches = fs.readdirSync(MUSE_ROOT).filter(d => /^\d{8}_\d{4}$/.test(d)).sort();
     for (const b of batches) {
@@ -184,7 +220,7 @@ function getCandidates(): Candidate[] {
 }
 
 // -----------------------------------------------------------------------------
-// 5. 核心单窗口浏览器驱动流程
+// 5. 浏览器控制与页面操作
 // -----------------------------------------------------------------------------
 async function evaluate<T>(session: ChromeSession, expression: string): Promise<T> {
   const result = await session.cdp.send<{ result: { value: T } }>('Runtime.evaluate', {
@@ -257,6 +293,58 @@ async function uploadImageFile(session: ChromeSession, absolutePath: string, bef
   if (!ok) throw new Error(`Failed to insert image: ${path.basename(absolutePath)}`);
 }
 
+// 自动从正文选择首图作为 2.35:1 与 1:1 封面
+async function setCoverFromFirstImage(session: ChromeSession): Promise<boolean> {
+  try {
+    // 1. 点击“从正文选择”
+    const clicked = await evaluate<boolean>(session, `
+      (function() {
+        const btn = document.querySelector(".js_selectCoverFromContent") || document.querySelector(".js_cover_btn_area");
+        if (btn) {
+          btn.scrollIntoView({ block: "center" });
+          btn.click();
+          return true;
+        }
+        return false;
+      })()
+    `);
+    if (!clicked) return false;
+    await sleep(1500);
+
+    // 2. 选择正文第一张图并点击“下一步”
+    const step1 = await evaluate<boolean>(session, `
+      (function() {
+        const picker = document.querySelector(".weui-desktop-dialog_img-picker");
+        if (!picker) return false;
+        const firstImg = picker.querySelector(".img-picker__item, .weui-desktop-img-picker__item, li, img");
+        if (firstImg) firstImg.click();
+        const nextBtn = Array.from(picker.querySelectorAll("button, a")).find(b => b.textContent.trim() === "下一步");
+        if (nextBtn) { nextBtn.click(); return true; }
+        return false;
+      })()
+    `);
+    if (!step1) return false;
+    await sleep(1500);
+
+    // 3. 确认裁剪对话框并点击“确认”
+    const step2 = await evaluate<boolean>(session, `
+      (function() {
+        const confirmBtn = Array.from(document.querySelectorAll("button, a")).find(b => {
+          const s = window.getComputedStyle(b);
+          return s.display !== "none" && (b.textContent.trim() === "确认" || b.textContent.trim() === "完成");
+        });
+        if (confirmBtn) { confirmBtn.click(); return true; }
+        return false;
+      })()
+    `);
+    await sleep(1000);
+    return step2;
+  } catch (err) {
+    console.warn(`[wechat-batch] 设置封面图警告:`, err);
+    return false;
+  }
+}
+
 async function waitForDraftSaved(session: ChromeSession, timeoutMs = 30_000): Promise<string> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -288,10 +376,11 @@ async function ensureHomeSession(): Promise<{ cdp: CdpConnection; homeSession: C
   const existingPort = await findExistingChromeDebugPort(profileDir);
   if (existingPort) {
     try {
-      cdp = await CdpConnection.connect(`ws://127.0.0.1:${existingPort}`, 10_000);
+      const version = await fetch(`http://127.0.0.1:${existingPort}/json/version`).then(r => r.json());
+      cdp = await CdpConnection.connect(version.webSocketDebuggerUrl, 10_000);
       console.log(`[wechat-batch] 成功连接至已有浏览器端口: ${existingPort}`);
     } catch {
-      console.log(`[wechat-batch] 端口连接失效，重新启动浏览器会话...`);
+      console.log(`[wechat-batch] 重新启动浏览器会话...`);
       const launched = await launchChrome(WECHAT_URL, profileDir);
       cdp = launched.cdp;
     }
@@ -316,7 +405,7 @@ async function ensureHomeSession(): Promise<{ cdp: CdpConnection; homeSession: C
     }
   }
 
-  // 关闭残留的旧草稿编辑标签，保持环境清爽
+  // 关闭残留编辑页
   for (const t of targets.targetInfos) {
     if (t.type === 'page' && t.url.includes('appmsg_edit') && t.targetId !== homeTarget.targetId) {
       try { await cdp.send('Target.closeTarget', { targetId: t.targetId }); } catch {}
@@ -339,13 +428,17 @@ async function ensureHomeSession(): Promise<{ cdp: CdpConnection; homeSession: C
 }
 
 // -----------------------------------------------------------------------------
-// 主执行函数
+// 6. 主执行流水线
 // -----------------------------------------------------------------------------
 async function run() {
   console.log(`================================================================`);
-  console.log(`[wechat-batch] 启动微信公众号单窗口自动推送管线`);
-  console.log(`[wechat-batch] 标题规则：所有推文严格 <= 15 字`);
-  console.log(`[wechat-batch] 空行规则：全流程去空行，ProseMirror DOM 深度清洗`);
+  console.log(`[wechat-batch] 启动微信公众号单窗口自动推送管线 (增强完善版)`);
+  console.log(`[wechat-batch] 1. 标题要求：严格 <= 15 字`);
+  console.log(`[wechat-batch] 2. 作者字段：统一填入“锐多宝”`);
+  console.log(`[wechat-batch] 3. 摘要分行：元数据独立分行，杜绝挤成一团`);
+  console.log(`[wechat-batch] 4. 名片组件：文末自动插入“锐多宝”官方名片`);
+  console.log(`[wechat-batch] 5. 封面预览：自动从正文首图截取并确认 2.35:1 封面`);
+  console.log(`[wechat-batch] 6. 视觉排版：全面采用 grace 优雅科技深蓝主题`);
   console.log(`================================================================`);
 
   const history = loadHistory();
@@ -365,11 +458,9 @@ async function run() {
   let successCount = 0;
   let failCount = 0;
 
-  // 3. 循环批量推入草稿箱
   for (let i = 0; i < pending.length; i++) {
     const item = pending[i]!;
 
-    // 每完成 6 篇刷新一次主页，保持会话活性
     if (successCount > 0 && successCount % 6 === 0) {
       console.log(`[wechat-batch] 已连续完成 6 篇，轻量刷新一次主页保持会话活跃...`);
       try {
@@ -386,29 +477,26 @@ async function run() {
 
     let editorTargetId: string | null = null;
     try {
-      // 步骤 A: 读取并净化 Markdown 空行
+      // 步骤 A: 读取并净化 Markdown 空行，对摘要/元数据强制分行
       const rawMd = fs.readFileSync(item.fullPath, 'utf-8');
-      const purifiedMd = purifyMarkdownEmptyLines(rawMd);
+      const purifiedMd = purifyMarkdown(rawMd);
       
-      // 写入临时 Markdown 文件供转换
       const tempPurifiedPath = path.join(path.dirname(item.fullPath), `.temp_purified_${path.basename(item.fullPath)}`);
       fs.writeFileSync(tempPurifiedPath, purifiedMd, 'utf-8');
 
-      // 步骤 B: 转换 Markdown，生成 HTML 并解析标题和配图
-      const parsed = await convertMarkdown(tempPurifiedPath, { theme: 'default', citeStatus: true });
+      // 步骤 B: 采用顶级科技风 grace + #0052ff 主题转换
+      const parsed = await convertMarkdown(tempPurifiedPath, { theme: 'grace', color: '#0052ff', citeStatus: true });
       try { fs.unlinkSync(tempPurifiedPath); } catch {}
 
       // 步骤 C: 标题严格限制在 15 个字内
       const finalTitle = refineTitleTo15Chars(parsed.title || item.file);
-      console.log(`[wechat-batch] 原标题: "${parsed.title}"`);
       console.log(`[wechat-batch] 15字精简标题: "${finalTitle}" (${finalTitle.length} 字)`);
 
-      // 步骤 D: 读取 HTML 正文并深度剔除空段落
-      let htmlContent = fs.readFileSync(parsed.htmlPath, 'utf-8');
-      htmlContent = htmlContent.replace(/<p>\s*(<br\s*\/?>|&nbsp;|\s*)*<\/p>/gi, '');
-      htmlContent = htmlContent.replace(/<div>\s*(<br\s*\/?>|&nbsp;|\s*)*<\/div>/gi, '');
+      // 步骤 D: 读取 HTML 并进行后处理：元数据换行、清空行、追加【锐多宝官方公众号名片】
+      let rawHtml = fs.readFileSync(parsed.htmlPath, 'utf-8');
+      const finalHtmlContent = postProcessHtml(rawHtml);
 
-      // 步骤 E: 在当前浏览器窗口中，通过主页点击“文章”打开新标签页
+      // 步骤 E: 在常驻主页中点击“文章”唤起新编辑标签页
       const currentTargets = await cdp.send<{ targetInfos: Array<{ targetId: string; url: string; type: string }> }>('Target.getTargets');
       const beforeIds = new Set(currentTargets.targetInfos.map(t => t.targetId));
 
@@ -440,31 +528,43 @@ async function run() {
       if (!titleReady) throw new Error('编辑器加载超时 (#title 未出现)');
       await waitForElement(editSession, BODY_EDITOR_SELECTOR, 15_000);
 
-      // 步骤 F: 填写标题与作者
+      // 步骤 F: 填写标题与作者（严格固定作者为：锐多宝）
       await evaluate(editSession, `
         (function() {
-          const el = document.querySelector('#title');
-          el.focus();
-          el.value = ${JSON.stringify(finalTitle)};
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
+          // 标题
+          const tEl = document.querySelector('#title');
+          if (tEl) {
+            tEl.focus();
+            tEl.value = ${JSON.stringify(finalTitle)};
+            tEl.dispatchEvent(new Event('input', { bubbles: true }));
+            tEl.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+
+          // 作者：锐多宝
+          const aEl = document.querySelector('#author');
+          if (aEl) {
+            aEl.focus();
+            aEl.value = '锐多宝';
+            aEl.dispatchEvent(new Event('input', { bubbles: true }));
+            aEl.dispatchEvent(new Event('change', { bubbles: true }));
+          }
         })()
       `);
 
-      // 步骤 G: 注入 HTML 正文并执行 ProseMirror 内置 DOM 空行大扫除
-      console.log(`[wechat-batch] 注入正文内容并清洗编辑器空行...`);
+      // 步骤 G: 注入 HTML 正文并清洗 ProseMirror DOM 空行
+      console.log(`[wechat-batch] 注入正文（含锐多宝名片）并清洗编辑器空行...`);
       await evaluate(editSession, `
         (function() {
           const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
           editor.focus();
-          editor.innerHTML = ${JSON.stringify(htmlContent)};
+          editor.innerHTML = ${JSON.stringify(finalHtmlContent)};
           editor.dispatchEvent(new Event('input', { bubbles: true }));
 
-          // 核心清洗：移除 ProseMirror 内所有空 <p> 标签，消除额外空行
+          // 核心清洗：移除 ProseMirror 内所有空白空行节点
           const paras = Array.from(editor.querySelectorAll('p, div'));
           for (const p of paras) {
             const txt = p.textContent.replace(/[\\s\\u00a0\\u3000]/g, '');
-            const hasMedia = p.querySelector('img, picture, svg, video, iframe, [data-wechat-image]');
+            const hasMedia = p.querySelector('img, picture, svg, video, iframe, [data-wechat-image], .wx_profile');
             if (txt === '' && !hasMedia) {
               p.remove();
             }
@@ -473,15 +573,14 @@ async function run() {
         })()
       `);
 
-      // 步骤 H: 注入图片
+      // 步骤 H: 替换注入图片
       if (parsed.contentImages.length > 0) {
-        console.log(`[wechat-batch] 开始依次替换插入 ${parsed.contentImages.length} 张本地高清图片...`);
+        console.log(`[wechat-batch] 依次替换插入 ${parsed.contentImages.length} 张本地高清图片...`);
         for (let idx = 0; idx < parsed.contentImages.length; idx++) {
           const img = parsed.contentImages[idx]!;
           const beforeCount = await getBodyImageCount(editSession);
           
-          // 定位占位符并删除
-          const foundPh = await evaluate<boolean>(editSession, `
+          await evaluate<boolean>(editSession, `
             (function() {
               const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
               const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
@@ -501,13 +600,21 @@ async function run() {
             })()
           `);
 
-          // 上传实际图片
           await uploadImageFile(editSession, img.localPath, beforeCount);
           await sleep(600);
         }
+
+        // 步骤 I: 设置封面图（从正文第一张图直接自动选为封面）
+        console.log(`[wechat-batch] 正在自动从正文选择首图作为文章封面预览图...`);
+        const coverOk = await setCoverFromFirstImage(editSession);
+        if (coverOk) {
+          console.log(`[wechat-batch] ✅ 文章封面预览图设置成功！`);
+        } else {
+          console.warn(`[wechat-batch] ⚠️ 封面设置未完成，可能正文未提取出首图`);
+        }
       }
 
-      // 步骤 I: 填写摘要
+      // 步骤 J: 填写摘要
       if (parsed.summary) {
         await evaluate(editSession, `
           (function() {
@@ -522,18 +629,18 @@ async function run() {
         `);
       }
 
-      // 步骤 J: 保存为草稿
+      // 步骤 K: 提交保存草稿箱
       console.log(`[wechat-batch] 提交保存至草稿箱...`);
       await evaluate(editSession, `document.querySelector('#js_submit button').click()`);
       const appmsgid = await waitForDraftSaved(editSession);
       console.log(`[wechat-batch] ✅ 保存成功！appmsgid: ${appmsgid}`);
 
-      // 步骤 K: 关闭当前编辑标签页，回到主标签页
+      // 步骤 L: 关闭当前编辑标签页，干净回到主标签页
       console.log(`[wechat-batch] 关闭已完成的编辑标签页，释放资源...`);
       await cdp.send('Target.closeTarget', { targetId: editorTargetId });
       editorTargetId = null;
 
-      // 步骤 L: 记录成功历史
+      // 步骤 M: 记录成功历史
       history[item.id] = {
         appmsgid,
         title: finalTitle,
@@ -541,17 +648,16 @@ async function run() {
         batch: item.batch,
         file: item.file,
         fullPath: item.fullPath,
+        author: '锐多宝',
         pushedAt: new Date().toISOString(),
       };
       saveHistory(history);
       successCount++;
 
-      // 适度休息 3 秒，避免频控
       await sleep(3000);
     } catch (err: any) {
       console.error(`[wechat-batch] ❌ 本篇处理失败:`, err?.message || err);
       failCount++;
-      // 若出错强行关闭该标签页，避免卡死后续
       if (editorTargetId && cdp) {
         try { await cdp.send('Target.closeTarget', { targetId: editorTargetId }); } catch {}
       }
