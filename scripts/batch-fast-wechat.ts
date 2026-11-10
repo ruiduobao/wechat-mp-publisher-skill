@@ -380,12 +380,22 @@ async function ensureHomeSession(): Promise<{ cdp: CdpConnection; homeSession: C
       cdp = await CdpConnection.connect(version.webSocketDebuggerUrl, 10_000);
       console.log(`[wechat-batch] 成功连接至已有浏览器端口: ${existingPort}`);
     } catch {
-      console.log(`[wechat-batch] 重新启动浏览器会话...`);
+      console.log(`[wechat-batch] 端口失效，正在重置并启动浏览器会话...`);
+      try {
+        const { spawnSync } = await import('node:child_process');
+        spawnSync('powershell.exe', ['-NoProfile', '-Command', 'Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue'], { stdio: 'ignore' });
+        await sleep(1500);
+      } catch {}
       const launched = await launchChrome(WECHAT_URL, profileDir);
       cdp = launched.cdp;
     }
   } else {
-    console.log(`[wechat-batch] 启动浏览器会话...`);
+    console.log(`[wechat-batch] 启动全新浏览器会话...`);
+    try {
+      const { spawnSync } = await import('node:child_process');
+      spawnSync('powershell.exe', ['-NoProfile', '-Command', 'Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue'], { stdio: 'ignore' });
+      await sleep(1500);
+    } catch {}
     const launched = await launchChrome(WECHAT_URL, profileDir);
     cdp = launched.cdp;
   }
