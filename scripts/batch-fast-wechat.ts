@@ -282,28 +282,7 @@ async function waitForDraftSaved(session: ChromeSession, timeoutMs = 30_000): Pr
   throw new Error('Timeout waiting for draft save confirmation');
 }
 
-// -----------------------------------------------------------------------------
-// 主执行函数
-// -----------------------------------------------------------------------------
-async function run() {
-  console.log(`================================================================`);
-  console.log(`[wechat-batch] 启动微信公众号单窗口自动推送管线`);
-  console.log(`[wechat-batch] 标题规则：所有推文严格 <= 15 字`);
-  console.log(`[wechat-batch] 空行规则：全流程去空行，ProseMirror DOM 深度清洗`);
-  console.log(`================================================================`);
-
-  const history = loadHistory();
-  const allCandidates = getCandidates();
-  const pending = allCandidates.filter(c => !history[c.id]);
-
-  console.log(`[wechat-batch] 扫描到推文总数: ${allCandidates.length} 篇 | 已入草稿: ${allCandidates.length - pending.length} 篇 | 待入草稿: ${pending.length} 篇`);
-
-  if (pending.length === 0) {
-    console.log(`[wechat-batch] 所有推文均已保存在草稿箱中，无需重复操作。`);
-    return;
-  }
-
-  // 1. 连接已有 Chrome 或启动单个 Chrome 实例
+async function ensureHomeSession(): Promise<{ cdp: CdpConnection; homeSession: ChromeSession }> {
   const profileDir = getDefaultProfileDir();
   let cdp: CdpConnection;
   const existingPort = await findExistingChromeDebugPort(profileDir);
@@ -312,7 +291,7 @@ async function run() {
       cdp = await CdpConnection.connect(`ws://127.0.0.1:${existingPort}`, 10_000);
       console.log(`[wechat-batch] 成功连接至已有浏览器端口: ${existingPort}`);
     } catch {
-      console.log(`[wechat-batch] 启动浏览器会话...`);
+      console.log(`[wechat-batch] 端口连接失效，重新启动浏览器会话...`);
       const launched = await launchChrome(WECHAT_URL, profileDir);
       cdp = launched.cdp;
     }
@@ -322,7 +301,6 @@ async function run() {
     cdp = launched.cdp;
   }
 
-  // 2. 定位公众号主页 Session（永久常驻标签页）
   await sleep(3000);
   const targets = await cdp.send<{ targetInfos: Array<{ targetId: string; url: string; type: string }> }>('Target.getTargets');
   let homeTarget = targets.targetInfos.find(t => t.type === 'page' && t.url.includes('/cgi-bin/home'));
@@ -348,7 +326,6 @@ async function run() {
   const { sessionId: homeSid } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: homeTarget.targetId, flatten: true });
   const homeSession: ChromeSession = { cdp, sessionId: homeSid, targetId: homeTarget.targetId };
 
-  // 验证是否已在 home
   const curUrl = await evaluate<string>(homeSession, 'window.location.href');
   if (!curUrl.includes('/cgi-bin/home')) {
     console.log(`[wechat-batch] 正在导航至公众号后台首页...`);
@@ -356,9 +333,33 @@ async function run() {
     await sleep(4000);
   }
 
-  // 等待首页菜单
   const menuOk = await waitForElement(homeSession, '.new-creation__menu', 30_000);
   if (!menuOk) throw new Error('公众号首页菜单加载超时，请检查登录态');
+  return { cdp, homeSession };
+}
+
+// -----------------------------------------------------------------------------
+// 主执行函数
+// -----------------------------------------------------------------------------
+async function run() {
+  console.log(`================================================================`);
+  console.log(`[wechat-batch] 启动微信公众号单窗口自动推送管线`);
+  console.log(`[wechat-batch] 标题规则：所有推文严格 <= 15 字`);
+  console.log(`[wechat-batch] 空行规则：全流程去空行，ProseMirror DOM 深度清洗`);
+  console.log(`================================================================`);
+
+  const history = loadHistory();
+  const allCandidates = getCandidates();
+  const pending = allCandidates.filter(c => !history[c.id]);
+
+  console.log(`[wechat-batch] 扫描到推文总数: ${allCandidates.length} 篇 | 已入草稿: ${allCandidates.length - pending.length} 篇 | 待入草稿: ${pending.length} 篇`);
+
+  if (pending.length === 0) {
+    console.log(`[wechat-batch] 所有推文均已保存在草稿箱中，无需重复操作。`);
+    return;
+  }
+
+  let { cdp, homeSession } = await ensureHomeSession();
   console.log(`[wechat-batch] ✅ 公众号后台常驻主页就绪！开始单窗口多标签批量录入...`);
 
   let successCount = 0;
@@ -367,6 +368,19 @@ async function run() {
   // 3. 循环批量推入草稿箱
   for (let i = 0; i < pending.length; i++) {
     const item = pending[i]!;
+
+    // 每完成 6 篇刷新一次主页，保持会话活性
+    if (successCount > 0 && successCount % 6 === 0) {
+      console.log(`[wechat-batch] 已连续完成 6 篇，轻量刷新一次主页保持会话活跃...`);
+      try {
+        await evaluate(homeSession, `window.location.reload()`);
+        await sleep(3500);
+        await waitForElement(homeSession, '.new-creation__menu', 25_000);
+      } catch (reloadErr) {
+        console.warn(`[wechat-batch] 刷新主页非致命警告:`, reloadErr);
+      }
+    }
+
     console.log(`\n----------------------------------------------------------------`);
     console.log(`[wechat-batch] 进度 [${i + 1}/${pending.length}] 处理: [${item.source.toUpperCase()}] ${item.batch} / ${item.file}`);
 
@@ -538,8 +552,20 @@ async function run() {
       console.error(`[wechat-batch] ❌ 本篇处理失败:`, err?.message || err);
       failCount++;
       // 若出错强行关闭该标签页，避免卡死后续
-      if (editorTargetId) {
+      if (editorTargetId && cdp) {
         try { await cdp.send('Target.closeTarget', { targetId: editorTargetId }); } catch {}
+      }
+      if (err?.message?.includes('CDP') || err?.message?.includes('WebSocket') || err?.message?.includes('Target') || err?.message?.includes('closed')) {
+        console.log('[wechat-batch] 检测到 CDP 异常，等待 5 秒重新获取常驻会话...');
+        await sleep(5000);
+        try {
+          const re = await ensureHomeSession();
+          cdp = re.cdp;
+          homeSession = re.homeSession;
+          console.log('[wechat-batch] 重新连接成功，继续后续录入！');
+        } catch (reErr) {
+          console.error('[wechat-batch] 自动重连失败:', reErr);
+        }
       }
       await sleep(3000);
     }
