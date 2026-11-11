@@ -61,7 +61,9 @@ export async function convertMarkdown(
   const { markdown: mermaidProcessedBody, images: mermaidImages } =
     await preprocessMermaidInMarkdown(body, {
       baseDir,
-      renderFn: renderMermaidToPng,
+      renderFn: async (code, outputPath, options) => {
+        await renderMermaidToPng(code, outputPath, options);
+      },
       onError: (error, block) => {
         const message = error instanceof Error ? error.message : String(error);
         console.error(

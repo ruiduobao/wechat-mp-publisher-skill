@@ -3,12 +3,18 @@
   "version": "1.0.0",
   "description": "微信公众号推文排版与全流程自动保存草稿箱技能 (WeChat Official Account Publisher Skill)",
   "main": "scripts/batch-fast-wechat.ts",
+  "bin": {
+    "wechat-publisher": "./bin/launch-publisher.mjs"
+  },
   "type": "module",
   "scripts": {
-    "start": "bun run scripts/batch-fast-wechat.ts",
-    "batch": "bun run scripts/batch-fast-wechat.ts",
+    "start": "node bin/launch-publisher.mjs",
+    "launch": "node bin/launch-publisher.mjs",
+    "batch": "node bin/launch-publisher.mjs",
     "sync": "bun run scripts/sync-wechat-drafts.ts",
-    "article": "bun run scripts/wechat-article.ts"
+    "article": "bun run scripts/wechat-article.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun run scripts/editor-features.test.ts && bun test scripts/article-content.test.ts scripts/editor-mode.test.ts scripts/editor-input.test.ts && bun run tests/draft-state.test.ts"
   },
   "keywords": [
     "wechat",
@@ -35,6 +41,7 @@
     "socks": "^2.8.9"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.4",
     "@types/node": "^22.0.0",
     "typescript": "^5.5.0"
   }

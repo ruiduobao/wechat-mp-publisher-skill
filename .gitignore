@@ -2,10 +2,49 @@
 node_modules/
 .bun/
 
-# User & Session Profiles
+# User & Session Profiles & Authentication Cache
 chrome-profile/
 wechat-login-qr.png
 wechat-draft-history.json
+wechat-draft-state.json
+draft-state.json
+draft-mapping.json
+*.session.json
+credentials*.json
+.env
+.env.*
+!.env.example
+data/
+cache/
+native-card-template.html
+cover-overrides.json
+titles-override.json
+wechat-legacy-baseline.json
+wechat-publisher.lock
+
+# Backups & Private Workspace States
+backups/
+*.backup
+*.bak
+
+# Test Evidence & Private Inspection Reports (D Subtask & QA runs)
+tests/reports/
+tests/evidence/
+tests/screenshots/
+tests/output/
+tests/private/
+test-results/
+coverage/
+
+# Manual integration verification scripts containing live tokens & draft IDs
+tests/*100021573*
+tests/inspect-target-before.ts
+tests/run-save-reopen-and-capture.ts
+tests/check-card.ts
+tests/run-repair-570.ts
+tests/test-insert-card-template.ts
+tests/batch-repair-runner.ts
+tests/repair-single-100021570.ts
 
 # Build & Runtime
 *.log

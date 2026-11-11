@@ -1,55 +1,34 @@
-# 运行环境与配置说明
+# 运行环境与配置
 
-## 1. 运行依赖
+统一入口需要 Node.js、Bun 和已安装的 Edge/Chrome。本轮实测 Windows 10.0.22631、Node.js 24.3、Bun 1.4.3、Edge。先在仓库执行 `bun install`。
 
-- **运行环境**: [Bun](https://bun.sh/)（推荐，`bun install` 极速安装）或 Node.js ≥ 20
-- **浏览器**: 本机已安装的 **Google Chrome** 或 **Microsoft Edge**（自动探测，无需手动配置）
-- **网络**: 首次扫码登录以及日常推文上传时需保证可以正常访问 `https://mp.weixin.qq.com/`
+`node bin/launch-publisher.mjs` 优先使用 `WECHAT_BUN_PATH`，其次 `~/.bun/bin/bun[.exe]`，最后 PATH 中的 `bun`。正式写入前使用本仓库 TypeScript 检查；`--help` 和 `--check` 保持只读。
 
----
+## 默认路径
 
-## 2. 核心路径说明
-
-| 配置项 | 默认路径 / 说明 |
+| 项目 | 本机默认值 |
 |---|---|
-| **Chrome/Edge Profile 目录** | `%APPDATA%\baoyu-skills\chrome-profile`（用于持久化保持微信公众平台的登录态） |
-| **已推历史数据库** | `~/.agents/skills/wechat-md-pipeline/data/wechat-draft-history.json`（记录所有已推送文章的 appmsgid） |
-| **二维码本地暂存路径** | `%USERPROFILE%\wechat-login-qr.png`（首次需要扫码时自动保存并弹窗） |
+| 代码库 | `C:\Users\Administrator\wechat-mp-publisher-skill` |
+| Muse 来源 | `F:\同步文件夹\公众号\每日推文` |
+| 本地独立来源 | `Z:\自媒体\公众号\每日推文` |
+| 历史 | `C:\Users\Administrator\.agents\skills\wechat-md-pipeline\data\wechat-draft-history.json` |
+| 基线 | 同一 data 目录的 `wechat-legacy-baseline.json` |
+| 锁 | 同一 data 目录的 `wechat-publisher.lock` |
+| 封面映射 | 同一 data 目录的 `cover-overrides.json`，内容为 `articleId -> 绝对文件路径` |
+| 原生名片模板 | 同一 data 目录的 `native-card-template.html`，由已验证草稿采集 |
+| 缓存 | `C:\Users\Administrator\.agents\skills\wechat-md-pipeline\cache` |
+| 浏览器 Profile | `%APPDATA%\baoyu-skills\chrome-profile` |
 
----
+这两个来源由不同生成/同步任务维护，发布只读；不得把缓存、封面、报告写入来源。已安装的两处 `wechat-mp-publisher` 技能目录链接到代码库，无需再复制运行时代码。
 
-## 3. 可选环境变量
+`getStatePaths` 支持 `WECHAT_HISTORY_FILE`、`WECHAT_LOCK_FILE`、`WECHAT_BASELINE_FILE`、`WECHAT_STATE_CACHE_DIR`、`WECHAT_MUSE_ROOT`、`WECHAT_LOCAL_ROOT`。当前批处理的封面和名片私有配置仍使用本机 data 路径，迁移设备时应核对调用处，不要假定全部路径自动迁移。
 
-您可以通过系统环境变量或在执行命令前指定以下参数进行个性化调整：
+## 浏览器
 
-```bash
-# 自定义浏览器可执行文件路径（如未在默认路径安装）
-export WECHAT_BROWSER_CHROME_PATH="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+- 可通过 `WECHAT_BROWSER_CHROME_PATH` 指定可执行文件。
+- Profile 可用 `BAOYU_CHROME_PROFILE_DIR` / `WECHAT_BROWSER_PROFILE_DIR` 指定。
+- 按 Profile 查找当前进程及调试端口，再取 `/json/version` 的实际 WebSocket 地址。
+- 复用有效登录主页；不杀其它 Edge，不关闭用户标签，不自动弹二维码图片。
+- 登录过期报告 `needs-attention`，保留映射并等待用户续期；不要当成内容或模型服务故障。
 
-# 远程扫码通知（可选）：配置 Telegram Bot 自动推送登录二维码到手机
-export TELEGRAM_BOT_TOKEN="your_bot_token"
-export TELEGRAM_CHAT_ID="your_chat_id"
-```
-
----
-
-## 4. 多账号支持（可选）
-
-如需管理多个微信公众号，可在 `~/.baoyu-skills/EXTEND.md` 中配置账号别名与专用 Profile：
-
-```yaml
-accounts:
-  tech_daily:
-    name: "科技前沿速递"
-    default_author: "科研小助手"
-    chrome_profile_path: "C:\\Users\\Administrator\\.baoyu-skills\\profiles\\tech"
-  geo_news:
-    name: "地信遥感观察"
-    default_author: "锐多宝"
-    chrome_profile_path: "C:\\Users\\Administrator\\.baoyu-skills\\profiles\\geo"
-```
-
-运行时通过 `--account <alias>` 参数进行一键切换：
-```bash
-bun run wechat-article.ts --account geo_news --markdown article.md --submit
-```
+HTML 原生复制会用本次排版内容覆盖系统剪贴板，不读取或记录用户原剪贴板。临时复制页只包含本次内容，复制后关闭。

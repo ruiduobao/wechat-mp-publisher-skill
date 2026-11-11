@@ -1,0 +1,35 @@
+# 微信公众号发布技能 (WeChat MP Publisher Skill) - 版权与归属声明 (NOTICE)
+
+## 1. 上游开源项目与依赖说明 (Upstream Attribution & Dependencies)
+
+本项目部分依赖与基础架构参考并集成了以下开源生态组件：
+
+### 1.1 baoyu-skills 生态 (Jim Liu / @baoyu)
+- **原作者**: Jim Liu (@baoyu)
+- **开源主页**: https://github.com/JimLiu/baoyu-skills
+- **许可证**: MIT License
+- **依赖说明**: 本项目通过 `package.json` 引入了 `baoyu-chrome-cdp` 与 `baoyu-md` 等官方发布的 npm 模块，用于基础 Chrome DevTools Protocol 交互与 Markdown 转微信富文本 HTML 基础解析。
+- **关于 doocs/md 的关系说明**: `baoyu-md` 内部包含从 `doocs/md` (WTFPL License, Copyright (C) 2025 Doocs) 适配的排版主题与样式代码。该关系为上游依赖包内部之衍生关系，非本项目直接复制代码。本项目对此予以明确标注与致谢。
+
+---
+
+## 2. 本项目新增与重大架构改进说明 (ruiduobao Additions & Modifications)
+
+本项目由 ruiduobao 及其团队针对学术科研推文与批量草稿发布场景进行了重大衍生开发与深度工程改造，包含以下独创设计：
+1. **单窗口多标签生命周期流水线**: 彻底革新多进程频繁重启模式，在常驻微信后台主页的基础上实现单窗口新开标签页录入、保存草稿后即时销毁标签的高性能流水线。
+2. **正文原题 H1 完整保留机制**: 解决移动端外显标题长度限制与正文原题完整性矛盾，在正文首节点强制保留学术一级标题（H1），并提供防重复注入机制。
+3. **真实首图封面与官方原生名片深度防御**:
+   - 交互式选择正文首图为封面，并在保存后严格校验真实背景 URL，杜绝空封面与假封面；
+   - 交互式调用微信官方原生名片插入工具，配合 `isAtEnd` 深度 DOM 回溯校验，确保名片稳定置于文章末尾。
+4. **双源目录只读保护与状态安全架构**:
+   - 对 `F:\同步文件夹`（Muse Syncthing 来源）实施严格只读保护；
+   - 独立构建草稿状态机（`draft-state`），支持深拷贝合并更新（Merge Update）、双采样写稳定性校验、互斥锁与遗留基线隔离。
+5. **Canonical 轻量启动器与 0 变更防护**: 提供 `bin/launch-publisher.mjs`，在 0 新增 0 更新场景下安全退出，不触碰浏览器。
+
+---
+
+## 3. 授权边界与免责声明 (Scope & Disclaimers)
+
+1. **草稿箱范围 (Drafts Only)**: 本工具仅保存为微信公众号草稿箱，绝不代理任何最终群发操作。
+2. **会话有效期 (Session Expiration)**: 微信网页登录 Cookies 存在时效性，受腾讯安全机制控制会定期过期，本项目不承诺“永久免登”；失效时需人工扫码续期。
+3. **工程交付状态**: 新推文全量上传链路与富媒体处理以最终联合验收实测为准；未通过项安全停留在 `needs-attention`。

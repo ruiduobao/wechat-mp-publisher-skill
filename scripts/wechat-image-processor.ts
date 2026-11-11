@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { Jimp, JimpMime } from "jimp";
+import { createRequire } from "node:module";
+import { Jimp, JimpMime, type JimpInstance } from "jimp";
 import decodeWebp, { init as initWebpDecode } from "@jsquash/webp/decode.js";
 
 export interface WechatUploadAsset {
@@ -31,7 +31,7 @@ export const WECHAT_BODY_IMAGE_UNSUPPORTED_FORMATS = new Set([
   ".ico",
 ]);
 
-const BODY_UPLOAD_ALLOWED_MIME_TYPES = new Set([
+const BODY_UPLOAD_ALLOWED_MIME_TYPES = new Set<string>([
   JimpMime.jpeg,
   JimpMime.png,
 ]);
@@ -87,7 +87,7 @@ export function detectImageFormatFromBuffer(buffer: Buffer): { contentType: stri
 
 let webpDecoderReady: Promise<void> | undefined;
 
-type JimpImage = Awaited<ReturnType<typeof Jimp.read>>;
+type JimpImage = JimpInstance;
 
 function normalizeMimeType(contentType: string): string {
   return contentType.split(";")[0]!.trim().toLowerCase();
@@ -127,11 +127,9 @@ export function needsWechatBodyImageProcessing(asset: WechatUploadAsset): boolea
 async function ensureWebpDecoder(): Promise<void> {
   if (!webpDecoderReady) {
     webpDecoderReady = (async () => {
-      const __filename = fileURLToPath(import.meta.url);
-      const __dirname = path.dirname(__filename);
-      const wasmPath = path.resolve(__dirname, "node_modules/@jsquash/webp/codec/dec/webp_dec.wasm");
+      const wasmPath = createRequire(import.meta.url).resolve("@jsquash/webp/codec/dec/webp_dec.wasm");
       const wasmModule = await WebAssembly.compile(await fs.readFile(wasmPath));
-      await initWebpDecode(wasmModule, {});
+      await initWebpDecode(wasmModule as any);
     })();
   }
 
@@ -144,19 +142,22 @@ async function loadImageForProcessing(asset: WechatUploadAsset): Promise<JimpIma
 
   if (fileExt === ".webp" || normalizedMimeType === "image/webp") {
     await ensureWebpDecoder();
-    const decoded = await decodeWebp(asset.buffer);
-    return new Jimp({
+    const arrayBuffer = asset.buffer.buffer.slice(asset.buffer.byteOffset, asset.buffer.byteOffset + asset.buffer.byteLength) as ArrayBuffer;
+    const decoded = await decodeWebp(arrayBuffer);
+    const jimpImage: JimpImage = new Jimp({
       data: Buffer.from(decoded.data.buffer, decoded.data.byteOffset, decoded.data.byteLength),
       width: decoded.width,
       height: decoded.height,
     });
+    return jimpImage;
   }
 
   if (fileExt === ".svg" || fileExt === ".ico") {
     throw new Error(`Cannot convert ${fileExt} image for WeChat body upload; provide a PNG or JPG instead.`);
   }
 
-  return Jimp.read(asset.buffer);
+  const readImage = await Jimp.read(asset.buffer);
+  return readImage as unknown as JimpImage;
 }
 
 function imageHasTransparency(image: JimpImage): boolean {
