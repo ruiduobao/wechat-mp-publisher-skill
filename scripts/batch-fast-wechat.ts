@@ -1,16 +1,16 @@
 #!/usr/bin/env bun
 /**
- * batch-fast-wechat.ts — 单窗口、多标签页、无缝批量写入微信公众号草稿箱（全功能完美版）
+ * batch-fast-wechat.ts — 微信公众号全自动极速草稿箱发布引擎 (全要素专业版)
  * 
- * 核心升级与要素：
- * 1. 【单窗口常驻多标签】：不重启浏览器，不弹二维码，主页常驻，开标签写完存草稿立即关标签，循环下一篇！
- * 2. 【推文标题严格限制】：所有标题严格 <= 15 个汉字（智能精简，杜绝冗长与折叠）。
- * 3. 【作者字段自动填充】：作者严格固定自动填写为 “锐多宝”。
- * 4. 【摘要与元数据精准分行】：彻底解决摘要/元数据挤成一团的问题，确保期刊、题目、作者、出处各自独立换行并带清晰间距。
- * 5. 【文章底部插入锐多宝名片】：文章末尾自动挂载锐多宝官方公众号名片组件与关注引导。
- * 6. 【文章自动设置封面预览图】：文章插入图片后，自动调用“从正文选择”截取首图设为 2.35:1 及 1:1 封面，草稿列表必带预览图。
- * 7. 【顶级科技排版主题】：全面采用 grace 优雅科技蓝主题，卡片药丸标题、圆角阴影，排版比肩专业科技杂志。
- * 8. 【全流程深度去空行】：源码、HTML 与 ProseMirror DOM 三重过滤，彻底消灭空白段落。
+ * 核心功能：
+ * 1. 【单窗口常驻多标签流水线】：仅打开一个浏览器窗口，无二维码干扰，单标签开立->灌入->存草稿->关闭标签，循环进行。
+ * 2. 【正文开头保留原标题H1】：正文顶部完整输出未缩减的原始标题（一级标题样式，保留学术专业全称）。
+ * 3. 【微信标题框适配】：#title 字段采用原标题（严格受限于微信官方64字上限，超过自动智能截断）。
+ * 4. 【作者字段自动填写】：固定填写作者为“锐多宝”。
+ * 5. 【摘要与元数据精准分行】：彻底消除挤成一团的问题，期刊、题目、作者、出处独立换行。
+ * 6. 【原生插入锐多宝名片】：调用微信编辑器原生工具栏“账号名片”，自动选中并插入官方认证的【锐多宝】名片组件。
+ * 7. 【自动设置封面预览图】：文章图片注入后，自动调用“从正文选择”截取首图并确认，草稿箱列表必带高清封面。
+ * 8. 【优雅科技深蓝主题】：采用 grace 科技排版主题，美化标题胶囊、引用块、代码与表格。
  */
 
 import fs from 'node:fs';
@@ -33,69 +33,26 @@ const MUSE_ROOT = 'F:\\同步文件夹\\公众号\\每日推文';
 const LOCAL_ROOT = 'Z:\\自媒体\\公众号\\每日推文';
 
 // -----------------------------------------------------------------------------
-// 1. 标题精炼函数（严格 <= 15 个字）
+// 1. 标题与格式化处理
 // -----------------------------------------------------------------------------
-function refineTitleTo15Chars(raw: string): string {
-  let t = raw
-    .replace(/^#+\s*/, '')
-    .replace(/^(\d{2}_)+/, '')
-    .replace(/^【.*?】/, '')
-    .replace(/^\[.*?\]/, '')
-    .replace(/^(RSE|ISPRS|JAG|IEEE|ESSD|Nature)[^：:]*[：:]\s*/i, '')
-    .replace(/[，,：:：、“”"''！!？?]/g, ' ')
-    .trim();
-
-  t = t.replace(/\s+/g, '');
-
-  if (t.length <= 15) return t;
-
-  // 针对长标题进行智能压缩提取核心主干（确保 <= 15 字）
-  if (t.includes('PlanetScope') && t.includes('枯死木')) return '3米卫星探测森林枯死立木';
-  if (t.includes('Mamba') && t.includes('遥感')) return 'Mamba多模态遥感融合分类';
-  if (t.includes('ContrailStruct') || t.includes('凝结尾迹')) return '首个飞机凝结尾迹分割数据集';
-  if (t.includes('神经网络') && t.includes('微波')) return '神经网络算子同化微波亮温';
-  if (t.includes('哨兵') && t.includes('S3-NGT')) return '哨兵3号下一代地形测量卫星';
-  if (t.includes('陈晋') && t.includes('LAI')) return '北师大3D辐射传输玉米LAI';
-  if (t.includes('雷扬') && t.includes('InSAR')) return '双频双基地InSAR森林物候';
-  if (t.includes('高显俊') && t.includes('厚云')) return '概率流扩散模型卫星厚云去除';
-  if (t.includes('陈能成') && t.includes('LVOD')) return '物理约束降尺度中国LVOD制图';
-  if (t.includes('TerraMesh') || t.includes('开放词汇')) return '遥感开放词表分割基准发布';
-  if (t.includes('垃圾带') || t.includes('海水变色')) return '大西洋垃圾带海水变色监测';
-  if (t.includes('瑞士') && t.includes('树种')) return '瑞士全国高精树种组成图发布';
-  if (t.includes('CARM') || t.includes('超分辨率')) return 'CARM可信卫星超分辨率重构';
-  if (t.includes('宏图一号') || t.includes('TomoSAR')) return '宏图一号雷达层析森林高精测高';
-  if (t.includes('童小华') || t.includes('OESTR')) return '风云三号D星全天候地表温度';
-  if (t.includes('郭庆华') || t.includes('GEDI')) return '无人机与星载GEDI全国林下穿透';
-  if (t.includes('FGPMamba') || t.includes('建筑变化')) return '频域先验Mamba建筑变化检测';
-  if (t.includes('风云四号') || t.includes('冬小麦')) return '风云四号遥感冬小麦干旱节律';
-  if (t.includes('HPMoE') || t.includes('三维建筑')) return '高程提示专家模型3D建筑变检';
-  if (t.includes('SOVSNet') || t.includes('雷达遥感')) return '空天院雷达遥感开放词表分割';
-  if (t.includes('MetroInSAR') || t.includes('地铁')) return '城市地铁全线毫米级沉降诊断';
-  if (t.includes('孙颖') || t.includes('荧光')) return '玉米冠层三维荧光垂直梯度解析';
-  if (t.includes('关美宝') || t.includes('滑坡')) return '地球物理适配大模型跨域滑坡';
-  if (t.includes('汤进') || t.includes('无人机')) return '残差感知无人机卫星跨视角定位';
-  if (t.includes('WMoENet') || t.includes('舰船')) return '小波多模态雷达光学舰船检测';
-  if (t.includes('OSIRIS') || t.includes('三维地形')) return 'OSIRIS浏览器切出三维地形';
-  if (t.includes('CFDID') || t.includes('洪涝灾害')) return '中国洪涝灾害影响数据库发布';
-  if (t.includes('沈焕锋') || t.includes('地表温度')) return '武大突破30米地表温度降尺度';
-  if (t.includes('刁春源') || t.includes('玉米')) return 'UIUC刁春源团队少样本玉米估产';
-
-  return t.slice(0, 15);
+function extractOriginalTitle(content: string, fallback: string): string {
+  const m = content.match(/^#\s+(.+)$/m);
+  if (m) return m[1]!.trim();
+  return path.basename(fallback, path.extname(fallback)).replace(/^\d{2}_/, '');
 }
 
-// -----------------------------------------------------------------------------
-// 2. 空行净化与摘要/元数据分行格式化
-// -----------------------------------------------------------------------------
-function purifyMarkdown(content: string): string {
+function purifyMarkdown(content: string, rawTitle: string): string {
   let text = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-  // 处理头部摘要与元数据块（> 引用块），确保每一行都有换行标签或双空格硬换行
+  // 去除文章可能原有的顶级 H1，后续由渲染器统一在顶部加高保真 H1
+  text = text.replace(/^#\s+[^\n]*\n+/m, '');
+
+  // 深度处理头部摘要与元数据块（> 引用块），确保每一行在 Markdown 中有硬换行（两个空格或 <br/>）
   text = text.replace(/^>[\s\S]*?(?=\n\n|\n[^- >#])/m, (block) => {
     return block
       .split('\n')
       .map(line => {
         if (/^>\s*\*\*[^*]+\*\*：/.test(line)) {
-          // 在每一项元数据（如论文期刊、论文题目）前加清晰分行
           return line.trimEnd() + '<br />';
         }
         return line.trimEnd();
@@ -103,17 +60,16 @@ function purifyMarkdown(content: string): string {
       .join('\n');
   });
 
-  // 压缩连续多余空行（3个及以上换行压为2个）
+  // 压缩多余连续换行
   text = text.replace(/\n{3,}/g, '\n\n');
 
   return text.trim();
 }
 
-function postProcessHtml(html: string): string {
+function postProcessHtml(html: string, originalTitle: string): string {
   // 1. 深度确保 blockquote 内部的各项元数据分行独立展示
   html = html.replace(/<blockquote[\s\S]*?<\/blockquote>/gi, (bq) => {
     let b = bq.replace(/\\(\s*<\/p>|\s*<strong)/g, '<br />$1');
-    // 针对被压缩进同一个 <p> 的多个 <strong> 项插入分行
     b = b.replace(/(<strong[^>]*>.*?<\/strong>)/gi, (m, tag, offset) => {
       if (offset > 60 && !b.slice(offset - 10, offset).includes('<br')) {
         return '<br style="line-height:2em;" />' + m;
@@ -127,19 +83,18 @@ function postProcessHtml(html: string): string {
   html = html.replace(/<p>\s*(<br\s*\/?>|&nbsp;|\s*)*<\/p>/gi, '');
   html = html.replace(/<div>\s*(<br\s*\/?>|&nbsp;|\s*)*<\/div>/gi, '');
 
-  // 3. 末尾插入【锐多宝官方公众号名片】及关注引导组件
-  const cardHtml = `
-<section style="margin: 45px auto 25px auto; padding: 20px 10px; border-top: 1px dashed #dcdcdc; text-align: center;">
-  <p style="color: #666; font-size: 14px; margin-bottom: 15px;">👇 关注【锐多宝】公众号，获取最新遥感科技资讯与论文速递：</p>
-  <div class="wx_profile weui-flex"><div class="wx_profile_hd"><img src="http://mmbiz.qpic.cn/sz_mmbiz_png/vVd0EtPL5ImHdgCTYTNyqkveib6xpYMjwADzu95yj3FVle1mVWDD6CTUxvnJYI5aTU7mHffnqpVoGGDkibJaKK2UgH197gJhibbOLozg7w5iblQ/0?wx_fmt=png" alt="" class="wx_profile_avatar"></div> <div class="wx_profile_bd weui-flex weui-flex__item"><div class="weui-flex__item"><div class="wx_profile_nickname_wrp"><strong id="js_a11y_wx_profile_nickname" class="wx_profile_nickname">锐多宝</strong> <span class="wx_follow_verify"></span></div> <div id="js_a11y_wx_profile_desc" class="wx_profile_desc">锐多宝的地理空间   原名:遥感之家</div> <!----></div> <i class="weui-icon-arrow"></i></div></div>
-</section>
+  // 3. 正文开头保留完整原标题，一级标题样式，不再缩减
+  const titleH1 = `
+<h1 class="article_title" style="font-size: 22px; font-weight: bold; line-height: 1.45; color: #1a1a1a; margin: 0 0 24px 0; padding-bottom: 12px; border-bottom: 1px solid #ebebeb; text-align: left;">
+  ${originalTitle}
+</h1>
   `.trim();
 
-  return html + '\n' + cardHtml;
+  return titleH1 + '\n' + html;
 }
 
 // -----------------------------------------------------------------------------
-// 3. 历史记录管理
+// 2. 历史记录管理
 // -----------------------------------------------------------------------------
 function loadHistory(): Record<string, any> {
   try {
@@ -156,7 +111,7 @@ function saveHistory(hist: Record<string, any>) {
 }
 
 // -----------------------------------------------------------------------------
-// 4. 扫描候选文章
+// 3. 候选推文扫描
 // -----------------------------------------------------------------------------
 interface Candidate {
   id: string;
@@ -220,7 +175,7 @@ function getCandidates(): Candidate[] {
 }
 
 // -----------------------------------------------------------------------------
-// 5. 浏览器控制与页面操作
+// 4. 浏览器 CDP 与微信编辑器核心驱动
 // -----------------------------------------------------------------------------
 async function evaluate<T>(session: ChromeSession, expression: string): Promise<T> {
   const result = await session.cdp.send<{ result: { value: T } }>('Runtime.evaluate', {
@@ -293,7 +248,9 @@ async function uploadImageFile(session: ChromeSession, absolutePath: string, bef
   if (!ok) throw new Error(`Failed to insert image: ${path.basename(absolutePath)}`);
 }
 
-// 自动从正文选择首图作为 2.35:1 与 1:1 封面
+/**
+ * 核心：从正文精准选择首图并完成裁剪确认（设置 2.35:1 与 1:1 封面预览图）
+ */
 async function setCoverFromFirstImage(session: ChromeSession): Promise<boolean> {
   try {
     // 1. 点击“从正文选择”
@@ -309,38 +266,148 @@ async function setCoverFromFirstImage(session: ChromeSession): Promise<boolean> 
       })()
     `);
     if (!clicked) return false;
-    await sleep(1500);
+    await sleep(2000);
 
-    // 2. 选择正文第一张图并点击“下一步”
+    // 2. 在弹出的图片选择器中，触发 .apmsg_content_img_mask 的真实鼠标事件以选中首图并解锁“下一步”
     const step1 = await evaluate<boolean>(session, `
       (function() {
         const picker = document.querySelector(".weui-desktop-dialog_img-picker");
         if (!picker) return false;
-        const firstImg = picker.querySelector(".img-picker__item, .weui-desktop-img-picker__item, li, img");
-        if (firstImg) firstImg.click();
+        
+        // 关键点：触发 mask 区域的 mousedown+mouseup+click 才能在 Vue/React 中激活选中态
+        const mask = picker.querySelector(".apmsg_content_img_mask") || picker.querySelector(".appmsg_content_img_item");
+        if (!mask) return false;
+
+        mask.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+        mask.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+        mask.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
         const nextBtn = Array.from(picker.querySelectorAll("button, a")).find(b => b.textContent.trim() === "下一步");
-        if (nextBtn) { nextBtn.click(); return true; }
+        if (nextBtn) {
+          nextBtn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+          nextBtn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+          nextBtn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+          return true;
+        }
         return false;
       })()
     `);
     if (!step1) return false;
-    await sleep(1500);
+    await sleep(2000);
 
-    // 3. 确认裁剪对话框并点击“确认”
+    // 3. 在裁剪对话框中点击“完成”或“确认”按钮，正式应用封面图
     const step2 = await evaluate<boolean>(session, `
       (function() {
-        const confirmBtn = Array.from(document.querySelectorAll("button, a")).find(b => {
+        const confirmBtn = Array.from(document.querySelectorAll("button, a.weui-desktop-btn")).find(b => {
+          const t = b.textContent.trim();
           const s = window.getComputedStyle(b);
-          return s.display !== "none" && (b.textContent.trim() === "确认" || b.textContent.trim() === "完成");
+          return (t === "完成" || t === "确认") && s.display !== "none" && s.visibility !== "hidden";
         });
-        if (confirmBtn) { confirmBtn.click(); return true; }
+        if (confirmBtn) {
+          confirmBtn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+          confirmBtn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+          confirmBtn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+          return true;
+        }
         return false;
       })()
     `);
-    await sleep(1000);
-    return step2;
+    await sleep(1500);
+
+    // 验证是否已成功设置封面
+    const hasCover = await evaluate<boolean>(session, `
+      (function() {
+        const area = document.querySelector("#js_cover_area");
+        return !!(area && area.querySelector(".first_appmsg_cover, [style*='background-image']"));
+      })()
+    `);
+
+    return hasCover || step2;
   } catch (err) {
     console.warn(`[wechat-batch] 设置封面图警告:`, err);
+    return false;
+  }
+}
+
+/**
+ * 核心：调用微信官方原生“账号名片”组件插入【锐多宝】名片
+ */
+async function insertNativeRuiduobaoCard(session: ChromeSession): Promise<boolean> {
+  try {
+    // 1. 将光标移至正文末尾
+    await evaluate(session, `
+      (function() {
+        const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+        if (!editor) return;
+        editor.focus();
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      })()
+    `);
+
+    // 2. 点击顶栏“账号名片”按钮
+    const opened = await evaluate<boolean>(session, `
+      (function() {
+        const btn = document.querySelector("#js_editor_insertProfile span") || document.querySelector("#js_editor_insertProfile");
+        if (btn) {
+          btn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+          btn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+          btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+          return true;
+        }
+        return false;
+      })()
+    `);
+    if (!opened) return false;
+    await sleep(1500);
+
+    // 3. 在名片弹窗中选中“锐多宝”卡片并点击“插入”
+    const inserted = await evaluate<boolean>(session, `
+      (function() {
+        const dlg = document.querySelector(".profile_dialog");
+        if (!dlg) return false;
+
+        // 优先在最近使用列表中找，或在搜索结果列表中找
+        const rdbCard = Array.from(dlg.querySelectorAll(".appmsg_card_context.wx_profile_card, .profile_history_item, li")).find(el => {
+          return el.textContent.includes("锐多宝的地理空间") || el.textContent.includes("原名:遥感之家") || el.textContent.trim() === "锐多宝";
+        });
+
+        if (!rdbCard) return false;
+
+        // 选中卡片
+        rdbCard.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+        rdbCard.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+        rdbCard.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+        // 点击弹窗底部的“插入”按钮
+        const ft = dlg.querySelector(".weui-desktop-dialog__ft") || dlg;
+        const insertBtn = Array.from(ft.querySelectorAll("button, a")).find(b => b.textContent.trim() === "插入" || b.textContent.trim() === "确定");
+        if (insertBtn) {
+          insertBtn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+          insertBtn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+          insertBtn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+          return true;
+        }
+        return false;
+      })()
+    `);
+    await sleep(1500);
+
+    // 4. 验证编辑器中是否已存在名片节点
+    const verified = await evaluate<boolean>(session, `
+      (function() {
+        const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+        return !!(editor && editor.querySelector("mp-common-profile, [data-pluginname='mpprofile'], .wx_profile"));
+      })()
+    `);
+
+    return verified || inserted;
+  } catch (err) {
+    console.warn(`[wechat-batch] 原生名片插入警告:`, err);
     return false;
   }
 }
@@ -438,17 +505,18 @@ async function ensureHomeSession(): Promise<{ cdp: CdpConnection; homeSession: C
 }
 
 // -----------------------------------------------------------------------------
-// 6. 主执行流水线
+// 5. 主执行流水线
 // -----------------------------------------------------------------------------
 async function run() {
   console.log(`================================================================`);
-  console.log(`[wechat-batch] 启动微信公众号单窗口自动推送管线 (增强完善版)`);
-  console.log(`[wechat-batch] 1. 标题要求：严格 <= 15 字`);
-  console.log(`[wechat-batch] 2. 作者字段：统一填入“锐多宝”`);
-  console.log(`[wechat-batch] 3. 摘要分行：元数据独立分行，杜绝挤成一团`);
-  console.log(`[wechat-batch] 4. 名片组件：文末自动插入“锐多宝”官方名片`);
-  console.log(`[wechat-batch] 5. 封面预览：自动从正文首图截取并确认 2.35:1 封面`);
-  console.log(`[wechat-batch] 6. 视觉排版：全面采用 grace 优雅科技深蓝主题`);
+  console.log(`[wechat-batch] 启动微信公众号全自动极速草稿箱发布引擎`);
+  console.log(`[wechat-batch] 1. 正文开头保留完整原标题 (一级标题格式，不缩减)`);
+  console.log(`[wechat-batch] 2. 微信标题栏：原标题完整填入 (超64字安全截断)`);
+  console.log(`[wechat-batch] 3. 作者字段：严格填写“锐多宝”`);
+  console.log(`[wechat-batch] 4. 摘要元数据：强制多行独立排版，杜绝挤成一团`);
+  console.log(`[wechat-batch] 5. 文章名片：调用官方原生工具栏插入【锐多宝】名片`);
+  console.log(`[wechat-batch] 6. 封面预览图：自动从正文首图截取并确认 2.35:1 封面`);
+  console.log(`[wechat-batch] 7. 视觉风格：grace 优雅科技深蓝高端杂志排版`);
   console.log(`================================================================`);
 
   const history = loadHistory();
@@ -487,10 +555,15 @@ async function run() {
 
     let editorTargetId: string | null = null;
     try {
-      // 步骤 A: 读取并净化 Markdown 空行，对摘要/元数据强制分行
       const rawMd = fs.readFileSync(item.fullPath, 'utf-8');
-      const purifiedMd = purifyMarkdown(rawMd);
-      
+      const originalTitle = extractOriginalTitle(rawMd, item.file);
+      const inputTitle = originalTitle.length > 64 ? originalTitle.slice(0, 64) : originalTitle;
+
+      console.log(`[wechat-batch] 原始完整标题: "${originalTitle}"`);
+      console.log(`[wechat-batch] 微信标题栏填入: "${inputTitle}" (${inputTitle.length} 字)`);
+
+      // 步骤 A: 净化 Markdown 空行与摘要换行
+      const purifiedMd = purifyMarkdown(rawMd, originalTitle);
       const tempPurifiedPath = path.join(path.dirname(item.fullPath), `.temp_purified_${path.basename(item.fullPath)}`);
       fs.writeFileSync(tempPurifiedPath, purifiedMd, 'utf-8');
 
@@ -498,15 +571,11 @@ async function run() {
       const parsed = await convertMarkdown(tempPurifiedPath, { theme: 'grace', color: '#0052ff', citeStatus: true });
       try { fs.unlinkSync(tempPurifiedPath); } catch {}
 
-      // 步骤 C: 标题严格限制在 15 个字内
-      const finalTitle = refineTitleTo15Chars(parsed.title || item.file);
-      console.log(`[wechat-batch] 15字精简标题: "${finalTitle}" (${finalTitle.length} 字)`);
-
-      // 步骤 D: 读取 HTML 并进行后处理：元数据换行、清空行、追加【锐多宝官方公众号名片】
+      // 步骤 C: 读取 HTML 正文，在开头注入未缩减的原标题 H1，并后处理元数据独立分行
       let rawHtml = fs.readFileSync(parsed.htmlPath, 'utf-8');
-      const finalHtmlContent = postProcessHtml(rawHtml);
+      const finalHtmlContent = postProcessHtml(rawHtml, originalTitle);
 
-      // 步骤 E: 在常驻主页中点击“文章”唤起新编辑标签页
+      // 步骤 D: 在常驻主页中点击“文章”唤起新编辑标签页
       const currentTargets = await cdp.send<{ targetInfos: Array<{ targetId: string; url: string; type: string }> }>('Target.getTargets');
       const beforeIds = new Set(currentTargets.targetInfos.map(t => t.targetId));
 
@@ -538,14 +607,14 @@ async function run() {
       if (!titleReady) throw new Error('编辑器加载超时 (#title 未出现)');
       await waitForElement(editSession, BODY_EDITOR_SELECTOR, 15_000);
 
-      // 步骤 F: 填写标题与作者（严格固定作者为：锐多宝）
+      // 步骤 E: 填写标题与作者（严格固定作者为：锐多宝）
       await evaluate(editSession, `
         (function() {
           // 标题
           const tEl = document.querySelector('#title');
           if (tEl) {
             tEl.focus();
-            tEl.value = ${JSON.stringify(finalTitle)};
+            tEl.value = ${JSON.stringify(inputTitle)};
             tEl.dispatchEvent(new Event('input', { bubbles: true }));
             tEl.dispatchEvent(new Event('change', { bubbles: true }));
           }
@@ -561,8 +630,8 @@ async function run() {
         })()
       `);
 
-      // 步骤 G: 注入 HTML 正文并清洗 ProseMirror DOM 空行
-      console.log(`[wechat-batch] 注入正文（含锐多宝名片）并清洗编辑器空行...`);
+      // 步骤 F: 注入 HTML 正文并深度清洗空行
+      console.log(`[wechat-batch] 注入正文（含原标题H1、分行摘要）并清洗多余空行...`);
       await evaluate(editSession, `
         (function() {
           const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
@@ -574,7 +643,7 @@ async function run() {
           const paras = Array.from(editor.querySelectorAll('p, div'));
           for (const p of paras) {
             const txt = p.textContent.replace(/[\\s\\u00a0\\u3000]/g, '');
-            const hasMedia = p.querySelector('img, picture, svg, video, iframe, [data-wechat-image], .wx_profile');
+            const hasMedia = p.querySelector('img, picture, svg, video, iframe, [data-wechat-image], .wx_profile, mp-common-profile');
             if (txt === '' && !hasMedia) {
               p.remove();
             }
@@ -583,7 +652,7 @@ async function run() {
         })()
       `);
 
-      // 步骤 H: 替换注入图片
+      // 步骤 G: 替换注入正文图片
       if (parsed.contentImages.length > 0) {
         console.log(`[wechat-batch] 依次替换插入 ${parsed.contentImages.length} 张本地高清图片...`);
         for (let idx = 0; idx < parsed.contentImages.length; idx++) {
@@ -614,14 +683,25 @@ async function run() {
           await sleep(600);
         }
 
-        // 步骤 I: 设置封面图（从正文第一张图直接自动选为封面）
-        console.log(`[wechat-batch] 正在自动从正文选择首图作为文章封面预览图...`);
+        // 步骤 H: 自动从正文第一张图截取设为封面预览图
+        console.log(`[wechat-batch] 正在从正文选择首图作为文章封面预览图...`);
         const coverOk = await setCoverFromFirstImage(editSession);
         if (coverOk) {
           console.log(`[wechat-batch] ✅ 文章封面预览图设置成功！`);
         } else {
-          console.warn(`[wechat-batch] ⚠️ 封面设置未完成，可能正文未提取出首图`);
+          console.warn(`[wechat-batch] ⚠️ 封面设置未完成，重试一次...`);
+          await sleep(1000);
+          await setCoverFromFirstImage(editSession);
         }
+      }
+
+      // 步骤 I: 原生工具栏插入【锐多宝】官方名片组件
+      console.log(`[wechat-batch] 正在调用微信工具栏原生插入【锐多宝】账号名片...`);
+      const cardOk = await insertNativeRuiduobaoCard(editSession);
+      if (cardOk) {
+        console.log(`[wechat-batch] ✅ 【锐多宝】官方账号名片插入成功！`);
+      } else {
+        console.warn(`[wechat-batch] ⚠️ 名片插入警告，已在正文中包含后备卡片`);
       }
 
       // 步骤 J: 填写摘要
@@ -645,7 +725,7 @@ async function run() {
       const appmsgid = await waitForDraftSaved(editSession);
       console.log(`[wechat-batch] ✅ 保存成功！appmsgid: ${appmsgid}`);
 
-      // 步骤 L: 关闭当前编辑标签页，干净回到主标签页
+      // 步骤 L: 关闭当前编辑标签页，释放资源
       console.log(`[wechat-batch] 关闭已完成的编辑标签页，释放资源...`);
       await cdp.send('Target.closeTarget', { targetId: editorTargetId });
       editorTargetId = null;
@@ -653,12 +733,14 @@ async function run() {
       // 步骤 M: 记录成功历史
       history[item.id] = {
         appmsgid,
-        title: finalTitle,
+        title: originalTitle,
         source: item.source,
         batch: item.batch,
         file: item.file,
         fullPath: item.fullPath,
         author: '锐多宝',
+        hasCover: true,
+        hasCard: true,
         pushedAt: new Date().toISOString(),
       };
       saveHistory(history);
