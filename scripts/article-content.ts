@@ -879,8 +879,28 @@ export async function locatePlaceholderAndSetAnchor(
     return false;
   })()`);
   if (!selected) return false;
+  await new Promise(r => setTimeout(r, 100));
   await session.cdp.send('Input.insertText', { text: `⟦${anchorId}⟧` }, { sessionId: session.sessionId });
-  return evaluatePage<boolean>(session, `document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)}).textContent.includes(${JSON.stringify(`⟦${anchorId}⟧`)})`);
+  await new Promise(r => setTimeout(r, 100));
+  return evaluatePage<boolean>(session, `(() => {
+    const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+    if (!editor) return false;
+    const marker = ${JSON.stringify(`⟦${anchorId}⟧`)};
+    const target = ${JSON.stringify(placeholder)};
+    if (!editor.textContent.includes(marker)) return false;
+    if (editor.textContent.includes(target)) {
+      const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = walker.nextNode())) {
+        const idx = n.textContent.indexOf(target);
+        if (idx >= 0 && !/\\d/.test(n.textContent[idx + target.length] || '')) {
+          n.textContent = n.textContent.slice(0, idx) + n.textContent.slice(idx + target.length);
+          break;
+        }
+      }
+    }
+    return !editor.textContent.includes(target);
+  })()`);
 }
 
 /** Only accept a new, loaded image in the marker block or its immediately following image block. */

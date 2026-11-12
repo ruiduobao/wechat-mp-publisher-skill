@@ -649,6 +649,7 @@ export async function processSingleArticle(
     if (!titleReady) throw new Error('编辑器标题输入框 (#title) 加载超时');
     await waitForSelector(editSession, BODY_EDITOR_SELECTOR, 20_000);
     await assertArticleEditor(editSession);
+    await sleep(2000);
     await installSaveNetworkHook(editSession);
 
     // 2. 捕获进入时的原正文与图片 URL 集合快照
@@ -1115,7 +1116,7 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
       }
 
       if (i < candidates.length - 1) {
-        await sleep(3000);
+        await sleep(4000);
       }
     }
 
