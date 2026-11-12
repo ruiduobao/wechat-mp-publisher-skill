@@ -105,6 +105,10 @@ function createMockSession(
           } else if (expr.includes('actualText: editor?.textContent')) {
             const override = evalHandler(expr);
             val = override?.actualText !== undefined ? override : { trusted: true, htmlAvailable: true, actualText: clipboardHtml.replace(/<[^>]*>/g, '') };
+          } else if (expr.includes('return { expectedText: text.slice')) {
+            val = { expectedText: JSON.parse(expr.match(/const marker = (".*");/)![1]!) };
+          } else if (expr.includes('selection.toString() ===')) {
+            val = true;
           } else if (expr.includes('editor.addEventListener') || /^!?document\.querySelector/.test(expr)) {
             val = true;
           } else {

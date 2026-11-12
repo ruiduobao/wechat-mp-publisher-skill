@@ -108,6 +108,7 @@ export interface DraftStateRecord {
   status: 'active' | 'saved-unverified' | 'needs-reconcile' | 'missing-image' | 'untracked';
   hasCover: boolean;
   hasCard: boolean;
+  pendingContentUpdate?: boolean; // 完整正文更新尚未验收，元数据修补不能清除
   appliedFingerprint?: ContentFingerprint; // 上次成功全量内容发布并验证通过的基线指纹
   observedFingerprint?: ContentFingerprint;// 当前本地实时指纹
   featureRepairObservedFingerprint?: string; // 最近一次完成排版修复复验时的本地指纹 (防每日重复repair)
@@ -362,6 +363,7 @@ export function loadHistoryDatabase(pathsOverride?: StatePathsConfig): Record<st
       status: item.status || (item.appmsgid ? 'active' : 'needs-reconcile'),
       hasCover: item.hasCover === true,
       hasCard: item.hasCard === true,
+      pendingContentUpdate: item.pendingContentUpdate === true,
       appliedFingerprint: item.appliedFingerprint || item.fingerprint,
       observedFingerprint: item.observedFingerprint,
       featureRepairObservedFingerprint: item.featureRepairObservedFingerprint,
@@ -399,6 +401,7 @@ export function atomicSaveHistory(database: Record<string, DraftStateRecord>, pa
       candidateAppmsgids: v.candidateAppmsgids,
       hasCover: v.hasCover,
       hasCard: v.hasCard,
+      pendingContentUpdate: v.pendingContentUpdate,
       appliedFingerprint: v.appliedFingerprint,
       observedFingerprint: v.observedFingerprint,
       featureRepairObservedFingerprint: v.featureRepairObservedFingerprint,
@@ -596,10 +599,10 @@ export function computeStateCatalog(options: { dryRun?: boolean; targetId?: stri
       reconcileNote = fpError ? `指纹计算异常: ${fpError}` : `缺少本地图片或文件正在写入: ${imgReport.missingPaths.join('; ')}`;
       missingImageCount++;
     } else if (existing?.appmsgid) {
-      // 保持现有确认映射
-      status = 'active';
+      // 保持现有确认映射，未验收记录不能在扫描时自动晋升。
+      status = existing.pendingContentUpdate || existing.status === 'saved-unverified' ? 'saved-unverified' : 'active';
       activeCount++;
-    } else if (legacyBaseline.has(cand.id)) {
+    } else if (legacyBaseline.has(cand.id) || existing?.candidateAppmsgids?.length) {
       // 历史基线文章，未确认前一律为 needs-reconcile，杜绝从零创建
       status = 'needs-reconcile';
       reconcileNote = existing?.candidateAppmsgids?.length
@@ -628,6 +631,7 @@ export function computeStateCatalog(options: { dryRun?: boolean; targetId?: stri
       status,
       hasCover: existing?.hasCover || false,
       hasCard: existing?.hasCard || false,
+      pendingContentUpdate: existing?.pendingContentUpdate,
       appliedFingerprint: existing?.appliedFingerprint,
       observedFingerprint: observedFp,
       featureRepairObservedFingerprint: existing?.featureRepairObservedFingerprint,
@@ -659,6 +663,28 @@ export function computeStateCatalog(options: { dryRun?: boolean; targetId?: stri
 // -----------------------------------------------------------------------------
 // 7. 更新基线与复验证据记录 (供 A/D 完成后调用，支持注入)
 // -----------------------------------------------------------------------------
+export function recordDraftCandidate(
+  articleId: string,
+  appmsgid: string,
+  evidence: string,
+  pathsOverride?: StatePathsConfig
+): DraftStateRecord {
+  if (!/^\d+$/.test(appmsgid)) throw new Error('候选草稿 ID 格式错误');
+  const db = loadHistoryDatabase(pathsOverride);
+  const target = db[articleId];
+  if (!target) throw new Error(`未找到目标推文记录: ${articleId}`);
+  if (!target.candidateAppmsgids.some(candidate => candidate.appmsgid === appmsgid)) {
+    target.candidateAppmsgids.push({ appmsgid, evidence, timestamp: new Date().toISOString() });
+  }
+  if (!target.appmsgid) {
+    target.status = 'needs-reconcile';
+    target.reconcileNote = '已取得候选自动保存 ID，需独立核对身份，禁止再次新建';
+  }
+  target.updatedAt = new Date().toISOString();
+  atomicSaveHistory(db, pathsOverride);
+  return target;
+}
+
 export function recordVerifiedDraft(
   articleId: string,
   appmsgid: string,
@@ -689,8 +715,13 @@ export function recordVerifiedDraft(
     target.outerTitle = options.outerTitle.trim();
   }
 
+  if (mode === 'full-content') target.pendingContentUpdate = !evidence.verified;
+  if (mode === 'metadata-repair' && target.pendingContentUpdate) {
+    target.verification = { ...evidence, verified: false, evidenceNotes: `Metadata check only; full content remains unverified. ${evidence.evidenceNotes || ''}` };
+  }
+
   if (evidence.verified) {
-    target.status = 'active';
+    target.status = target.pendingContentUpdate ? 'saved-unverified' : 'active';
     if (mode === 'full-content') {
       // 仅当经过全量内容与图片真实注入发布，才晋升指纹基线
       if (target.observedFingerprint) {

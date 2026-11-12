@@ -30,6 +30,7 @@ import {
   releaseProcessLock,
   computeStateCatalog,
   recordVerifiedDraft,
+  recordDraftCandidate,
   buildWechatEditUrl,
   sanitizeUrlForLog,
   verifyImagesIntegrity,
@@ -230,6 +231,11 @@ export function planArticleAction(
     return { action: 'content-update', reason: '显式指令: 在原草稿上强制使用 E 模块重建正文与上传高清图片 (--refresh-content)' };
   }
 
+  if (item.appmsgid && (item.pendingContentUpdate || (!isBaseline && !item.appliedFingerprint))) {
+    if (options.repair) return { action: 'needs-reconcile', reason: 'needs-content-refresh: 完整正文尚未验收，不能用元数据修补替代，请使用 --refresh-content --id' };
+    return { action: 'content-update', reason: '已保全草稿 ID，但完整正文更新未验收，继续在原稿完成正文与图片' };
+  }
+
   // 1. 显式 --repair 模式 (仅执行元数据/封面/名片修补)
   if (options.repair) {
     if (!item.appmsgid) {
@@ -282,8 +288,8 @@ export function planArticleAction(
   }
 
   // 3. 无草稿 ID：
-  if (isBaseline) {
-    return { action: 'needs-reconcile', reason: '属于旧基线文章但缺少确证草稿 ID，禁止从 0 重复建稿' };
+  if (isBaseline || item.candidateAppmsgids?.length) {
+    return { action: 'needs-reconcile', reason: item.candidateAppmsgids?.length ? '已有候选保存 ID 尚待身份核对，禁止从 0 重复建稿' : '属于旧基线文章但缺少确证草稿 ID，禁止从 0 重复建稿' };
   }
 
   // 基线之外的崭新文章
@@ -719,6 +725,9 @@ export async function processSingleArticle(
 
     // 4. 若非纯 repair 模式，调用 E 模块进行 ProseMirror 事务注入与图片上传
     if (!isRepairMode) {
+      if (item.appmsgid) {
+        recordVerifiedDraft(item.id, item.appmsgid, { verified: false, evidenceNotes: 'Full content update started; remains pending until independent reopen passes' }, { mode: 'full-content', outerTitle: finalOuterTitle });
+      }
       console.log(`[wechat-batch] 调用 E 模块: 渲染正文与上传本地图片...`);
       renderResult = await renderArticleContent(item.fullPath, { cacheRoot: STATE_CACHE_DIR });
       const applyRes = await applyArticleContent(editSession, renderResult, { expectedTitle: item.title });
@@ -966,6 +975,7 @@ export async function processSingleArticle(
       try {
         const assignedId = await evaluatePage<string | null>(editSession, `new URL(location.href).searchParams.get('appmsgid')`);
         if (assignedId && /^\d+$/.test(assignedId)) {
+          recordDraftCandidate(item.id, assignedId, 'Task-owned edit page received an autosaved ID; independent identity confirmation pending');
           const created = await cdp.send<{ targetId: string }>('Target.createTarget', { url: buildWechatEditUrl(assignedId, token) });
           recoveryTarget = created.targetId;
           const { sessionId } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: recoveryTarget, flatten: true });
@@ -1085,14 +1095,24 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
 
     if (options.dryRun) {
       console.log(`\n--- [DRY-RUN 待处理文章演练清单] ---`);
+      let needsTitleCount = 0;
       for (const c of candidates) {
         const plan = planArticleAction(c, options, legacyBaseline);
-        const resolvedTitle = resolveOuterTitle(c, '', options);
+        let resolvedTitle: string | undefined;
+        let titleProblem: string | undefined;
+        try {
+          resolvedTitle = resolveOuterTitle(c, '', options);
+        } catch (error: any) {
+          if (!String(error.message).startsWith('needs-title:')) throw error;
+          titleProblem = error.message;
+          needsTitleCount++;
+        }
         console.log(`* [${c.id}] action=${plan.action.toUpperCase()} appmsgid=${c.appmsgid || 'new'} file=${c.file}`);
         console.log(`    计划说明: ${plan.reason}`);
         console.log(`    完整标题: "${c.title}"`);
-        console.log(`    外部标题: "${resolvedTitle}"`);
+        console.log(titleProblem ? `    [needs-title] ${titleProblem}` : `    外部标题: "${resolvedTitle}"`);
       }
+      console.log(`[wechat-batch] 待补语义外题: ${needsTitleCount} 篇；正式写入仍要求标题校验通过。`);
       console.log(`\n[wechat-batch] DRY-RUN 完成，未修改任何真实草稿或数据库文件。`);
       return 0;
     }

@@ -861,46 +861,58 @@ export async function locatePlaceholderAndSetAnchor(
   placeholder: string,
   anchorId: string
 ): Promise<boolean> {
-  const selected = await evaluatePage<boolean>(session, `(() => {
+  const selected = await evaluatePage<{ expectedText: string } | null>(session, `(() => {
     const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
-    if (!editor) return false;
+    if (!editor) return null;
     const target = ${JSON.stringify(placeholder)};
+    const marker = ${JSON.stringify(`⟦${anchorId}⟧`)};
+    const text = editor.textContent || '';
+    const indices = [];
+    for (let offset = 0; offset < text.length;) {
+      const index = text.indexOf(target, offset);
+      if (index < 0) break;
+      if (!/\\d/.test(text[index + target.length] || '')) indices.push(index);
+      offset = index + target.length;
+    }
+    if (indices.length !== 1 || text.includes(marker)) return null;
     const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
     let node;
     while ((node = walker.nextNode())) {
-      const index = node.textContent.indexOf(target);
-      if (index < 0 || /\\d/.test(node.textContent[index + target.length] || '')) continue;
-      node.parentElement.scrollIntoView({ block: 'center' }); editor.focus();
-      const range = document.createRange(); range.setStart(node, index); range.setEnd(node, index + target.length);
-      const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
-      window[${JSON.stringify(anchorId)}] = { oldImages: new Set(editor.querySelectorAll('img')) };
-      return true;
-    }
-    return false;
-  })()`);
-  if (!selected) return false;
-  await new Promise(r => setTimeout(r, 100));
-  await session.cdp.send('Input.insertText', { text: `⟦${anchorId}⟧` }, { sessionId: session.sessionId });
-  await new Promise(r => setTimeout(r, 100));
-  return evaluatePage<boolean>(session, `(() => {
-    const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
-    if (!editor) return false;
-    const marker = ${JSON.stringify(`⟦${anchorId}⟧`)};
-    const target = ${JSON.stringify(placeholder)};
-    if (!editor.textContent.includes(marker)) return false;
-    if (editor.textContent.includes(target)) {
-      const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
-      let n;
-      while ((n = walker.nextNode())) {
-        const idx = n.textContent.indexOf(target);
-        if (idx >= 0 && !/\\d/.test(n.textContent[idx + target.length] || '')) {
-          n.textContent = n.textContent.slice(0, idx) + n.textContent.slice(idx + target.length);
-          break;
-        }
+      for (let offset = 0; offset < node.textContent.length;) {
+        const index = node.textContent.indexOf(target, offset);
+        if (index < 0) break;
+        offset = index + target.length;
+        if (/\\d/.test(node.textContent[index + target.length] || '')) continue;
+        node.parentElement.scrollIntoView({ block: 'center' }); editor.focus();
+        const range = document.createRange(); range.setStart(node, index); range.setEnd(node, index + target.length);
+        const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+        window[${JSON.stringify(anchorId)}] = { oldImages: new Set(editor.querySelectorAll('img')) };
+        return { expectedText: text.slice(0, indices[0]) + marker + text.slice(indices[0] + target.length) };
       }
     }
-    return !editor.textContent.includes(target);
+    return null;
   })()`);
+  if (!selected) return false;
+  await new Promise(resolve => setTimeout(resolve, 150));
+  const selectionReady = await evaluatePage<boolean>(session, `(() => {
+    const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+    const selection = getSelection();
+    return !!editor && document.activeElement === editor && !!selection &&
+      editor.contains(selection.anchorNode) && editor.contains(selection.focusNode) &&
+      selection.toString() === ${JSON.stringify(placeholder)};
+  })()`);
+  if (!selectionReady) {
+    await evaluatePage(session, `delete window[${JSON.stringify(anchorId)}]`);
+    return false;
+  }
+  await session.cdp.send('Input.insertText', { text: `⟦${anchorId}⟧` }, { sessionId: session.sessionId });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  const replaced = await evaluatePage<boolean>(session, `document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)})?.textContent === ${JSON.stringify(selected.expectedText)}`);
+  if (!replaced) {
+    await evaluatePage(session, `delete window[${JSON.stringify(anchorId)}]`);
+    throw new Error(`[article-content] 占位符未被原生输入准确替换: ${placeholder}，已停止该篇`);
+  }
+  return true;
 }
 
 /** Only accept a new, loaded image in the marker block or its immediately following image block. */

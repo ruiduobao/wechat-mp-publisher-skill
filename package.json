@@ -14,7 +14,7 @@
     "sync": "bun run scripts/sync-wechat-drafts.ts",
     "article": "bun run scripts/wechat-article.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun run scripts/editor-features.test.ts && bun test scripts/article-content.test.ts scripts/editor-mode.test.ts scripts/editor-input.test.ts && bun run tests/draft-state.test.ts"
+    "test": "bun run scripts/editor-features.test.ts && bun test scripts/article-content.test.ts scripts/editor-mode.test.ts scripts/editor-input.test.ts scripts/draft-recovery.test.ts && bun run tests/draft-state.test.ts"
   },
   "keywords": [
     "wechat",
