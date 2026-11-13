@@ -7,10 +7,23 @@ description: 保存或更新微信公众号普通长文草稿，包含 Markdown 
 
 本机权威代码库为 `C:\Users\Administrator\wechat-mp-publisher-skill`，唯一入口为 `bin/launch-publisher.mjs`。两处已安装同名技能链接到该代码库；不要复制另一套扫描器和状态库。更换设备时先读 [configuration.md](references/configuration.md) 核对本机路径和私有依赖。
 
-## 先检查，再编辑
+## 先核查，再检查，后编辑
 
 1. 读取 [operations.md](references/operations.md) 与实际 CLI 帮助。定时任务同时读 [cron-scheduling-prompt.md](references/cron-scheduling-prompt.md)。
-2. 执行只读预检或快捷检索（不写历史/锁/基线，不触碰浏览器）：
+2. **第一件事：先核查待同步推文的真实性与论文/DOI 有效性**（不要把假论文、假 DOI 或半成品写进草稿箱）：
+
+```bash
+# 方式一：独立核查待处理推文的论文题目、DOI (Crossref/doi.org)、arXiv 编号、原文链接与本地图片
+bun run verify
+
+# 方式二：带 --verify 同步执行只读预检与在线学术真实性核查
+node "C:/Users/Administrator/wechat-mp-publisher-skill/bin/launch-publisher.mjs" --check --verify
+```
+
+- 正式写入前（非 `--repair` 模式）引擎也会默认并发执行在线核查；发现 **404 假 DOI、DOI/arXiv 解析标题与推文声明严重不符、死链、0 字节损坏图片或占位符残留** 时直接阻断该篇同步。
+- 遇到站方 403 反爬拦截或无 DOI/链接的纯资讯稿发出警告时，由 Agent 联网搜索核实真伪后再同步；`--strict-verify` 连警告也阻断，`--skip-verify` 仅在人工已确认或离线时显式使用。
+
+3. 执行只读预检或快捷检索（不写历史/锁/基线，不触碰浏览器）：
 
 ```bash
 # 全量只读检查（遇缺短题会附内容摘要并继续列出全部候选）
@@ -63,7 +76,7 @@ node bin/launch-publisher.mjs --titles "C:/Users/Administrator/.agents/skills/we
 
 ## 编辑器与来源约束
 
-- 普通长文正文必须是可见可编辑的 `.rich_media_content .ProseMirror`。标题/摘要可能也有 ProseMirror，图片轮播消息还会保留隐藏长文镜像；“从这里开始写正文”不代表真实空稿。遇到 `unsupported-message-type` 保留并报告，不改 CSS 或隐藏类型。
+- 普通长文正文必须是可见可编辑的 `.rich_media_content .ProseMirror`。标题/摘要可能也有 ProseMirror，图片轮播消息还会保留隐藏长文镜像；“从这里开始写正文”不代表真实空稿。遇到 `unsupported-message-type` 保留原稿并持久化标记，后续全量同步自动跳过不再浪费超时时间（显式 `--id` 仍可单独检测），不改 CSS 或隐藏类型。
 - 复用宝玉 browser 路线专用 Profile 和主页，按 Profile 查端口，使用实际 WebSocket。若专用 Profile 尚未运行，统一引擎会以独立脱管进程安全拉起专用实例并保持常驻（不杀其它普通 Edge）。仅关闭本任务标签，不关闭用户标签、不反复开窗或弹二维码图片。公众号登录过期报告 `needs-attention`，与模型服务鉴权分开报告。
 - Muse 来源 `F:\同步文件夹\公众号\每日推文` 与本地独立来源 `Z:\自媒体\公众号\每日推文` 保持分离且发布只读。缓存、状态、封面、模板、日志与截图留在私有目录。
 - 完整正文通过原生 HTML 复制粘贴交给微信编辑器，复制页仅包含本次内容，复制后关闭；这会覆盖系统剪贴板，不读取原剪贴板。粘贴后轮询等待整篇规范化文本真正变为新内容，防止读取旧正文快照误判丢占位符。

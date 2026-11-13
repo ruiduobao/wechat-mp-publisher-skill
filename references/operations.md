@@ -17,11 +17,16 @@ Node.js 负责统一启动器，Bun 负责 TypeScript 运行时。正式写入�
 
 本机 `.agents/skills/wechat-mp-publisher` 与 `.zcode/skills/wechat-mp-publisher` 链接到同一代码库。修改仓库即可更新两处入口，不要再复制一套运行时。换设备时应先核对链接目标、私有配置与实际 CLI 帮助。
 
-## 2. 只读预检与快捷检索
+## 2. 第一件事：核查推文真实性与只读预检
+
+每次有待同步的新文件或内容更新时，**第一件事必须核查推文本身是否有问题**：论文是否真实存在、DOI 能否解析及标题是否一致、arXiv/GitHub/项目链接是否有效、本地图片是否完整无损。
 
 ```bash
-# 完整扫描，列出所有待处理项及缺标题文章的内容摘要
-node bin/launch-publisher.mjs --check
+# 1. 在线核查全部待处理文章（或用 --latest 1 / --id <articleId> / --search "<关键词>"）
+bun run verify
+
+# 2. 只读预检 + 同步核查（或仅快速预检 --check）
+node bin/launch-publisher.mjs --check --verify
 
 # 按关键词快速定位特定文章（匹配 ID、文件名、标题或正文前3000字，含已 SKIP 项）
 node bin/launch-publisher.mjs --check --search "GEM-15"
@@ -30,7 +35,9 @@ node bin/launch-publisher.mjs --check --search "GEM-15"
 node bin/launch-publisher.mjs --check --latest
 ```
 
-预检比较当前 PC 可见的两个来源与私有状态库。它不写历史、基线或进程锁，也不连接浏览器。未连通的 Muse 远端可能还有未到达本机的文件，因此只报告 PC 当前索引。指定不存在的 `--id` 会报错退出码 1，不再当作“0任务”跳过。
+正式执行 `CREATE` 或 `CONTENT-UPDATE` 前，引擎也会默认自动并发运行该项核查；遇到假 DOI（404）、DOI/arXiv 标题与推文声明严重不符、死链或残余占位符时直接拦截退出，绝不把问题推文写入公众号草稿箱。遇站方 403 反爬拦截或无 DOI 的纯资讯贴出现警告时，Agent 应联网搜索确认事件/论文真实性；可用 `--strict-verify` 对警告也严格阻断，仅人工已核实或离线环境使用 `--skip-verify`。
+
+预检比较当前 PC 可见的两个来源与私有状态库。它不写历史、基线或进程锁，也不连接浏览器。未连通的 Muse 远端可能还有未到达本机的文件，因此只报告 PC 当前索引。指定不存在的 `--id` 会报错退出码 1，不再当作“0任务”跳过。已确认的非普通长文（如图片轮播消息）会被记忆标记并在默认批量同步时自动保留跳过，不再每次浪费浏览器超时时间（显式 `--id` 仍可单独检测）。
 
 文章身份为 `source:batch:prefix`，例如 `muse:20261112_0700:01`。微信数字 `appmsgid` 是草稿 ID，两者不要混用。日常用 `articleId` 选择文章，由状态引擎找到对应草稿。
 

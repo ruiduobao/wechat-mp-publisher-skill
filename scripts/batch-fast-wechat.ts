@@ -33,6 +33,7 @@ import {
   computeStateCatalog,
   recordVerifiedDraft,
   recordDraftCandidate,
+  recordUnsupportedDraft,
   buildWechatEditUrl,
   sanitizeUrlForLog,
   verifyImagesIntegrity,
@@ -60,6 +61,7 @@ import {
   type RenderArticleResult,
 } from './article-content.ts';
 import { assertArticleEditor } from './editor-mode.ts';
+import { verifyArticleTruth } from './verify-article.ts';
 export { evaluateEditorMessageType, type EditorTypeSnapshot } from './editor-mode.ts';
 
 const WECHAT_URL = 'https://mp.weixin.qq.com/';
@@ -71,6 +73,9 @@ export interface BatchCliOptions {
   dryRun: boolean;
   repair: boolean;
   refreshContent: boolean;
+  verify?: boolean;
+  skipVerify?: boolean;
+  strictVerify?: boolean;
   id?: string;
   search?: string;
   latest?: number;
@@ -92,6 +97,9 @@ export function printHelpAndExit(): never {
 
 选项:
   --dry-run                 纯读演练模式 (不获取锁、不修改磁盘、不触碰浏览器)
+  --verify                  配合 --check 运行在线论文真实性与 DOI/arXiv/链接核查
+  --skip-verify             显式跳过正式写入前的在线 DOI/arXiv 真实性门禁
+  --strict-verify           严格核查模式 (遇到警告如无DOI/链接403也阻断发布)
   --repair                  安全原地精修模式 (优先在原草稿上修补 H1/作者/封面/名片，保留正文CDN图)
   --refresh-content         强制在原草稿上使用 E 模块重建正文与图片 (必须与 --id 配合)
   --id <articleId>          指定单篇推文处理 (例如 local:20261106_1800:02)
@@ -111,6 +119,9 @@ export function printHelpAndExit(): never {
 export function parseBatchArgs(): BatchCliOptions {
   const args = process.argv.slice(2);
   let dryRun = false;
+  let verify = false;
+  let skipVerify = false;
+  let strictVerify = false;
   let repair = false;
   let refreshContent = false;
   let id: string | undefined;
@@ -130,6 +141,12 @@ export function parseBatchArgs(): BatchCliOptions {
       printHelpAndExit();
     } else if (a === '--dry-run') {
       dryRun = true;
+    } else if (a === '--verify') {
+      verify = true;
+    } else if (a === '--skip-verify') {
+      skipVerify = true;
+    } else if (a === '--strict-verify') {
+      strictVerify = true;
     } else if (a === '--repair') {
       repair = true;
     } else if (a === '--refresh-content') {
@@ -236,7 +253,7 @@ export function parseBatchArgs(): BatchCliOptions {
     process.exit(2);
   }
 
-  return { dryRun, repair, refreshContent, id, search, latest, limit, batch, days, source, titleOverride, titlesFile, titleMap };
+  return { dryRun, verify, skipVerify, strictVerify, repair, refreshContent, id, search, latest, limit, batch, days, source, titleOverride, titlesFile, titleMap };
 }
 
 // -----------------------------------------------------------------------------
@@ -254,6 +271,11 @@ export function planArticleAction(
   // 检查是否存在与当前外层标题不同的显式覆盖诉求
   const explicitOverrideTitle = options.titleOverride || (options.titleMap && options.titleMap[item.id]);
   const hasDifferentTitleOverride = !!(explicitOverrideTitle && explicitOverrideTitle.trim() !== '' && explicitOverrideTitle.trim() !== (item.outerTitle || '').trim());
+
+  // 已知不支持的图片轮播等特殊消息类型：在未指定单篇 --id 强制重检时，直接安全跳过避免每次开浏览器等超时
+  if (item.unsupportedMessageType && !options.id && !options.refreshContent) {
+    return { action: 'skip', reason: `已保留非普通长文原稿 (${item.unsupportedMessageType})` };
+  }
 
   // 0. 显式 --refresh-content 模式 (窄可控入口: 原草稿上用 E 模块重建正文与高清图片)
   if (options.refreshContent) {
@@ -1066,7 +1088,14 @@ export async function processSingleArticle(
       error: isAllVerified ? undefined : '保存后独立标签重开复验未全部满足严格证据要求',
     };
   } catch (err: any) {
-    console.error(`[wechat-batch] ❌ 本篇处理异常:`, err?.message || err);
+    const errMsg = err?.message || String(err);
+    console.error(`[wechat-batch] ❌ 本篇处理异常:`, errMsg);
+    if (!options.dryRun && errMsg.includes('unsupported-message-type') && item.appmsgid) {
+      try {
+        recordUnsupportedDraft(item.id, item.appmsgid, errMsg);
+        console.warn(`[wechat-batch] 💾 已将 ${item.id} (${item.appmsgid}) 标记为已知非普通长文原稿，后续全量同步将自动跳过并保留原稿`);
+      } catch {}
+    }
     // 微信可能在手动保存前自动落库。先重开确认文章身份并保全 ID，避免失败重跑再建副本。
     if (!item.appmsgid && editSession && editorTargetId) {
       let recoveryTarget: string | undefined;
@@ -1214,10 +1243,14 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
       }
     }
 
+    let skippedUnsupportedCount = 0;
     let candidates = scopedArticles.filter(item => {
       const plan = planArticleAction(item, options, legacyBaseline);
 
-      if (plan.action === 'skip') return false;
+      if (plan.action === 'skip') {
+        if (item.unsupportedMessageType) skippedUnsupportedCount++;
+        return false;
+      }
 
       // needs-reconcile 项即使指定 --id 也绝对不得进入自动流程
       if (plan.action === 'needs-reconcile') {
@@ -1243,6 +1276,9 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
       candidates = candidates.slice(0, options.limit);
     }
 
+    if (skippedUnsupportedCount > 0) {
+      console.log(`[wechat-batch] ℹ️ 已自动保留并跳过 ${skippedUnsupportedCount} 篇已知非普通长文 (图片轮播等，免除重复打开超时)`);
+    }
     console.log(`[wechat-batch] 本次就绪待处理篇数: ${candidates.length} 篇`);
 
     if (candidates.length === 0) {
@@ -1293,20 +1329,80 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
       } else {
         console.log(`[wechat-batch] 待补语义外题: 0 篇；正式写入仍要求标题校验通过。`);
       }
+
+      if (options.verify) {
+        console.log(`\n--- [DRY-RUN 在线论文真实性与 DOI/arXiv/链接核查] ---`);
+        const reports = await Promise.all(
+          candidates.map(c => verifyArticleTruth(c.fullPath, { articleId: c.id }))
+        );
+        let verifyFail = 0;
+        for (const r of reports) {
+          const icon = r.status === 'pass' ? '✅ PASS' : r.status === 'warn' ? '⚠️ WARN' : '❌ FAIL';
+          console.log(`${icon} [${r.articleId}] ${r.extracted.articleTitle}`);
+          for (const d of r.doiChecks) console.log(`    [DOI] ${d.doi} -> ${d.status}: ${d.message}`);
+          for (const a of r.arxivChecks) console.log(`    [arXiv] ${a.arxivId} -> ${a.status}: ${a.message}`);
+          for (const u of r.urlChecks) console.log(`    [URL] ${u.url} -> ${u.status}: ${u.message}`);
+          for (const e of r.errors) console.error(`    ❌ ${e}`);
+          for (const w of r.warnings) console.warn(`    ⚠️ ${w}`);
+          if (r.status === 'fail' || (options.strictVerify && r.status === 'warn')) verifyFail++;
+        }
+        if (verifyFail > 0) {
+          console.error(`\n❌ [wechat-batch] 真实性核查发现 ${verifyFail} 篇存在致命问题或严格警告，已拦截。`);
+          return 1;
+        }
+      }
+
       console.log(`\n[wechat-batch] DRY-RUN 完成，未修改任何真实草稿或数据库文件。`);
       return 0;
+    }
+
+    // 正式写入前：默认并行核查待写入正文篇目的真实性、DOI、arXiv 与原文链接，防止虚假或残缺推文进入草稿箱
+    let verifiedCandidates = candidates;
+    let preVerifyFailCount = 0;
+    if (!options.skipVerify) {
+      const toVerify = candidates.filter(c => planArticleAction(c, options, legacyBaseline).action !== 'repair');
+      if (toVerify.length > 0) {
+        console.log(`[wechat-batch] 正在执行前置推文真实性与 DOI/arXiv/链接核查 (${toVerify.length} 篇)...`);
+        const reports = await Promise.all(
+          toVerify.map(c => verifyArticleTruth(c.fullPath, { articleId: c.id }))
+        );
+        const reportMap = new Map(reports.map(r => [r.articleId!, r]));
+        verifiedCandidates = candidates.filter(c => {
+          const rep = reportMap.get(c.id);
+          if (!rep) return true;
+          const isBlocked = rep.status === 'fail' || (options.strictVerify && rep.status === 'warn');
+          if (isBlocked) {
+            preVerifyFailCount++;
+            console.error(`❌ [wechat-batch] 拦截问题推文 [${c.id}] (${c.file}):`);
+            for (const e of rep.errors) console.error(`    错误: ${e}`);
+            for (const w of rep.warnings) console.error(`    警告: ${w}`);
+            return false;
+          }
+          if (rep.status === 'warn') {
+            console.warn(`⚠️ [wechat-batch] 真实性核查警告 [${c.id}]: ${rep.warnings.join('; ')}`);
+          } else {
+            console.log(`✅ [wechat-batch] 真实性核查通过 [${c.id}] (DOI:${rep.doiChecks.length} arXiv:${rep.arxivChecks.length} URL:${rep.urlChecks.length})`);
+          }
+          return true;
+        });
+      }
+    }
+
+    if (verifiedCandidates.length === 0) {
+      console.error(`[wechat-batch] ❌ 全部待处理文章均未通过前置真实性/DOI 核查，未启动浏览器，退出。`);
+      return 1;
     }
 
     const connected = await connectOrCreateHomeSession();
     console.log(`[wechat-batch] ✅ 公众号后台会话就绪，Token: ***${connected.token.slice(-4)}`);
 
     let successCount = 0;
-    let failCount = 0;
+    let failCount = preVerifyFailCount;
 
-    for (let i = 0; i < candidates.length; i++) {
-      const item = candidates[i]!;
+    for (let i = 0; i < verifiedCandidates.length; i++) {
+      const item = verifiedCandidates[i]!;
       console.log(`\n----------------------------------------------------------------`);
-      console.log(`[wechat-batch] 进度 [${i + 1}/${candidates.length}] 处理: ${item.id} (appmsgid: ${item.appmsgid || '新建'})`);
+      console.log(`[wechat-batch] 进度 [${i + 1}/${verifiedCandidates.length}] 处理: ${item.id} (appmsgid: ${item.appmsgid || '新建'})`);
 
       const res = await processSingleArticle(item, connected, options, legacyBaseline);
       if (res.success) {
@@ -1315,7 +1411,7 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
         failCount++;
       }
 
-      if (i < candidates.length - 1) {
+      if (i < verifiedCandidates.length - 1) {
         await sleep(1200);
       }
     }

@@ -1336,32 +1336,42 @@ export async function applyArticleContent(
     throw new Error('[article-content] 微信编辑器正文区 (.ProseMirror) 未就绪');
   }
 
-  // 2. 注入正文进入 ProseMirror 模型
-  await injectHtmlIntoProseMirror(session, contentResult.html, contentResult.images, options?.expectedTitle);
+  // 2. 与浏览器正文注入并行预处理所有待上传图片 (不阻塞粘贴且提速大图压缩)
+  const cleanups: Array<() => void> = [];
+  const preparedImagesPromise = Promise.all(
+    contentResult.images.map(async (item) => {
+      if (!fs.existsSync(item.localPath)) {
+        throw new Error(`[article-content] 待上传图片文件丢失: ${item.localPath}`);
+      }
+      const prepared = await prepareImageForWechatUpload(item.localPath);
+      cleanups.push(prepared.cleanup);
+      return prepared.uploadPath;
+    })
+  );
+  // 防止若 injectHtmlIntoProseMirror 先抛错时出现未捕获的 rejection
+  preparedImagesPromise.catch(() => {});
 
-  // 3. 逐个占位符精准上传图片 (支持同图重复引用的逐 occurrence 检测)
-  const expectedCount = contentResult.images.length;
-  let insertedCount = 0;
+  try {
+    await injectHtmlIntoProseMirror(session, contentResult.html, contentResult.images, options?.expectedTitle);
+    const preparedUploadPaths = await preparedImagesPromise;
 
-  for (let i = 0; i < contentResult.images.length; i++) {
-    const item = contentResult.images[i]!;
-    const anchorId = `_anchor_ph_${i}_${Date.now()}`;
+    // 3. 逐个占位符精准上传图片 (支持同图重复引用的逐 occurrence 检测)
+    const expectedCount = contentResult.images.length;
+    let insertedCount = 0;
 
-    // 定位占位符并建立锚点
-    const found = await locatePlaceholderAndSetAnchor(session, item.placeholder, anchorId);
-    if (!found) {
-      throw new Error(
-        `[article-content] 正文中未定位到占位符: ${item.placeholder} (${path.basename(item.localPath)})`
-      );
-    }
+    for (let i = 0; i < contentResult.images.length; i++) {
+      const item = contentResult.images[i]!;
+      const uploadPath = preparedUploadPaths[i]!;
+      const anchorId = `_anchor_ph_${i}_${Date.now()}`;
 
-    if (!fs.existsSync(item.localPath)) {
-      throw new Error(`[article-content] 待上传图片文件丢失: ${item.localPath}`);
-    }
+      // 定位占位符并建立锚点
+      const found = await locatePlaceholderAndSetAnchor(session, item.placeholder, anchorId);
+      if (!found) {
+        throw new Error(
+          `[article-content] 正文中未定位到占位符: ${item.placeholder} (${path.basename(item.localPath)})`
+        );
+      }
 
-    const { uploadPath, cleanup: cleanupPrepared } = await prepareImageForWechatUpload(item.localPath);
-
-    try {
       const doc = await session.cdp.send<{ root: { nodeId: number } }>('DOM.getDocument', {
         depth: -1,
         pierce: true,
@@ -1391,51 +1401,53 @@ export async function applyArticleContent(
 
       insertedCount++;
       await removeExtraEmptyLineAfterImage(session);
-    } finally {
-      cleanupPrepared();
+    }
+
+    // 4. 编辑态最终质量严审
+    const inspect = await inspectEditorPostContent(session);
+
+    if (!inspect.ok) {
+      const reasons: string[] = [];
+      if (inspect.residualPlaceholders.length > 0) {
+        reasons.push(`残余占位符未替换: ${inspect.residualPlaceholders.join(', ')}`);
+      }
+      if (inspect.localImagesRemaining.length > 0) {
+        reasons.push(`存在未上传本地图片/相对路径: ${inspect.localImagesRemaining.join(', ')}`);
+      }
+      if (inspect.brokenImages.length > 0) {
+        reasons.push(`存在破损或未完成加载图片: ${inspect.brokenImages.join(', ')}`);
+      }
+      if (inspect.unrecognizedRemote.length > 0) {
+        reasons.push(`存在未识别非微信 CDN 地址: ${inspect.unrecognizedRemote.join(', ')}`);
+      }
+      throw new Error(`[article-content] 编辑态质量检验失败:\n${reasons.join('\n')}`);
+    }
+
+    // 数量严格对应：微信 CDN 图片总数必须精确等于 (新上传数量 + 原稿已有合法 CDN 图片数)
+    const existingCdnCount = contentResult.existingCdnImages ? contentResult.existingCdnImages.length : 0;
+    const expectedTotalCdn = expectedCount + existingCdnCount;
+
+    if (inspect.cdnImagesCount !== expectedTotalCdn) {
+      throw new Error(
+        `[article-content] 微信 CDN 图片数量不匹配: 期望严格为 ${expectedTotalCdn} 张 (新上传 ${expectedCount} + 原稿保留 ${existingCdnCount})，实际存在 ${inspect.cdnImagesCount} 张`
+      );
+    }
+
+    return {
+      ok: true,
+      insertedImagesCount: insertedCount,
+      expectedImagesCount: expectedCount,
+      cdnImagesCount: inspect.cdnImagesCount,
+      existingCdnCount,
+      residualPlaceholders: inspect.residualPlaceholders,
+      brokenImages: inspect.brokenImages,
+      localImagesRemaining: inspect.localImagesRemaining,
+      unrecognizedRemote: inspect.unrecognizedRemote,
+      details: `正文与 ${insertedCount}/${expectedCount} 张本地图片已成功注入 ProseMirror 并就绪于微信 CDN (保留原有 CDN 图 ${existingCdnCount} 张)`,
+    };
+  } finally {
+    for (const cleanup of cleanups) {
+      try { cleanup(); } catch {}
     }
   }
-
-  // 4. 编辑态最终质量严审
-  const inspect = await inspectEditorPostContent(session);
-
-  if (!inspect.ok) {
-    const reasons: string[] = [];
-    if (inspect.residualPlaceholders.length > 0) {
-      reasons.push(`残余占位符未替换: ${inspect.residualPlaceholders.join(', ')}`);
-    }
-    if (inspect.localImagesRemaining.length > 0) {
-      reasons.push(`存在未上传本地图片/相对路径: ${inspect.localImagesRemaining.join(', ')}`);
-    }
-    if (inspect.brokenImages.length > 0) {
-      reasons.push(`存在破损或未完成加载图片: ${inspect.brokenImages.join(', ')}`);
-    }
-    if (inspect.unrecognizedRemote.length > 0) {
-      reasons.push(`存在未识别非微信 CDN 地址: ${inspect.unrecognizedRemote.join(', ')}`);
-    }
-    throw new Error(`[article-content] 编辑态质量检验失败:\n${reasons.join('\n')}`);
-  }
-
-  // 数量严格对应：微信 CDN 图片总数必须精确等于 (新上传数量 + 原稿已有合法 CDN 图片数)
-  const existingCdnCount = contentResult.existingCdnImages ? contentResult.existingCdnImages.length : 0;
-  const expectedTotalCdn = expectedCount + existingCdnCount;
-
-  if (inspect.cdnImagesCount !== expectedTotalCdn) {
-    throw new Error(
-      `[article-content] 微信 CDN 图片数量不匹配: 期望严格为 ${expectedTotalCdn} 张 (新上传 ${expectedCount} + 原稿保留 ${existingCdnCount})，实际存在 ${inspect.cdnImagesCount} 张`
-    );
-  }
-
-  return {
-    ok: true,
-    insertedImagesCount: insertedCount,
-    expectedImagesCount: expectedCount,
-    cdnImagesCount: inspect.cdnImagesCount,
-    existingCdnCount,
-    residualPlaceholders: inspect.residualPlaceholders,
-    brokenImages: inspect.brokenImages,
-    localImagesRemaining: inspect.localImagesRemaining,
-    unrecognizedRemote: inspect.unrecognizedRemote,
-    details: `正文与 ${insertedCount}/${expectedCount} 张本地图片已成功注入 ProseMirror 并就绪于微信 CDN (保留原有 CDN 图 ${existingCdnCount} 张)`,
-  };
 }

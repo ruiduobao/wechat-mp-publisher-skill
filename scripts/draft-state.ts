@@ -108,6 +108,7 @@ export interface DraftStateRecord {
   status: 'active' | 'saved-unverified' | 'needs-reconcile' | 'missing-image' | 'untracked';
   hasCover: boolean;
   hasCard: boolean;
+  unsupportedMessageType?: string; // 若检测到微信图片轮播等非普通长文类型，记录原因避免每次重开超时
   pendingContentUpdate?: boolean; // 完整正文更新尚未验收，元数据修补不能清除
   appliedFingerprint?: ContentFingerprint; // 上次成功全量内容发布并验证通过的基线指纹
   observedFingerprint?: ContentFingerprint;// 当前本地实时指纹
@@ -363,6 +364,7 @@ export function loadHistoryDatabase(pathsOverride?: StatePathsConfig): Record<st
       status: item.status || (item.appmsgid ? 'active' : 'needs-reconcile'),
       hasCover: item.hasCover === true,
       hasCard: item.hasCard === true,
+      unsupportedMessageType: item.unsupportedMessageType,
       pendingContentUpdate: item.pendingContentUpdate === true,
       appliedFingerprint: item.appliedFingerprint || item.fingerprint,
       observedFingerprint: item.observedFingerprint,
@@ -401,6 +403,7 @@ export function atomicSaveHistory(database: Record<string, DraftStateRecord>, pa
       candidateAppmsgids: v.candidateAppmsgids,
       hasCover: v.hasCover,
       hasCard: v.hasCard,
+      unsupportedMessageType: v.unsupportedMessageType,
       pendingContentUpdate: v.pendingContentUpdate,
       appliedFingerprint: v.appliedFingerprint,
       observedFingerprint: v.observedFingerprint,
@@ -631,6 +634,7 @@ export function computeStateCatalog(options: { dryRun?: boolean; targetId?: stri
       status,
       hasCover: existing?.hasCover || false,
       hasCard: existing?.hasCard || false,
+      unsupportedMessageType: existing?.unsupportedMessageType,
       pendingContentUpdate: existing?.pendingContentUpdate,
       appliedFingerprint: existing?.appliedFingerprint,
       observedFingerprint: observedFp,
@@ -685,6 +689,28 @@ export function recordDraftCandidate(
   return target;
 }
 
+export function recordUnsupportedDraft(
+  articleId: string,
+  appmsgid: string,
+  reason: string,
+  pathsOverride?: StatePathsConfig
+): DraftStateRecord {
+  const paths = getStatePaths(pathsOverride);
+  const db = loadHistoryDatabase(paths);
+  const target = db[articleId];
+  if (!target) throw new Error(`未找到目标推文记录: ${articleId}`);
+  target.appmsgid = appmsgid;
+  target.unsupportedMessageType = reason;
+  target.verification = {
+    ...target.verification,
+    verified: false,
+    evidenceNotes: `unsupported-message-type preserved: ${reason}`,
+  };
+  target.updatedAt = new Date().toISOString();
+  atomicSaveHistory(db, paths);
+  return target;
+}
+
 export function recordVerifiedDraft(
   articleId: string,
   appmsgid: string,
@@ -721,6 +747,7 @@ export function recordVerifiedDraft(
   }
 
   if (evidence.verified) {
+    target.unsupportedMessageType = undefined;
     target.status = target.pendingContentUpdate ? 'saved-unverified' : 'active';
     if (mode === 'full-content') {
       // 仅当经过全量内容与图片真实注入发布，才晋升指纹基线

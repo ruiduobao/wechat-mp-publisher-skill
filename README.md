@@ -24,7 +24,8 @@
 - **高清原图 CDP 直传与像素顺位校验**：自动转换大于 1MB 或非标准格式（如 WebP）图片，直接调用 `DOM.setFileInputFiles` 上传为微信官方 CDN 素材；保存重开后优先核对合法 qpic 域名 `/0`、`/640` 尺寸归一化，若微信去重或重签名改变 URL 路径，自动以 **32×32 RGBA 内存像素交叉 MAE** 检验内容与顺序无误。
 - **封面与官方原生名片**：支持正文首图裁剪封面及零正文图文章独立封面；支持插入与验证微信官方原生 `<mp-common-profile>` 名片组件居于正文末尾（新用户也可通过 `.env` 设为 `WECHAT_SKIP_PROFILE_CARD=1` 先跳过名片快速跑通）。
 - **保存后独立新标签物理重开复验**：保存取得 `appmsgid` 后立即持久化保全为 `saved-unverified`，关闭编辑页后新建独立标签页拉取同一草稿，严格核验文字、图片顺序与加载、首位唯一 H1、作者、外题、封面及名片 7 项指标，全部达标才推进指纹。
-- **双源增量扫描与消息类型守卫**：支持独立扫描本地目录与外部同步目录（如 Syncthing 只读源），按内容与图片 SHA-256 指纹增量更新；自动识别图片轮播消息（`item_show_type=8`）等非普通长文稿件并安全拦截，不破坏原稿。
+- **前置论文真实性与 DOI/arXiv 在线核查**：每次同步前自动（或通过 `bun run verify` / `--check --verify`）并发调用 Crossref、doi.org Handles、arXiv Export API 与原文链接校验——自动核对 DOI 与 arXiv 编号是否真实存在、解析出来的真实论文标题是否与推文一致，直接拦截假 DOI、张冠李戴、死链、0 字节图片和 TODO 占位符。
+- **高效本地批量同步**：正文粘贴与多图压缩预处理**并行重叠**执行，已知图片轮播草稿（`unsupported-message-type`）自动持久化记忆跳过，避免每次全量同步反复超时；配合 `--search`、`--latest` 与 `bun run titles` 一键完成日常同步。
 
 ---
 
@@ -117,8 +118,12 @@ node bin/launch-publisher.mjs --latest 1 --titles ./private-data/titles-override
 所有正式入口统一通过 `bin/launch-publisher.mjs`（正式写入前自动运行 TypeScript 检查）：
 
 ```bash
-# 只读演练与查找
-node bin/launch-publisher.mjs --check                         # 全量扫描并列出待办项与缺标题摘要
+# 第一步：核查待同步推文的真实性（论文标题 / DOI / arXiv / 原文链接 / 图片）
+bun run verify
+bun run verify --latest 3
+
+# 只读演练与查找（可加 --verify 一并核查）
+node bin/launch-publisher.mjs --check --verify
 node bin/launch-publisher.mjs --check --search "关键词"       # 按 ID/文件名/标题/正文搜索（含已跳过项）
 node bin/launch-publisher.mjs --check --latest 3              # 查看最新 3 篇状态
 
@@ -167,6 +172,7 @@ node bin/launch-publisher.mjs --help
 | [`scripts/editor-input.ts`](scripts/editor-input.ts) | 任务自有空白标签原生 HTML 复制粘贴与新正文替代轮询 |
 | [`scripts/editor-mode.ts`](scripts/editor-mode.ts) | 普通长文可见性/可编辑性守卫，拦截图片轮播消息隐藏镜像 |
 | [`scripts/editor-features.ts`](scripts/editor-features.ts) | 完整原题 H1、2.35:1 封面裁剪选择、原生 `mp-common-profile` 名片与巡检 |
+| [`scripts/verify-article.ts`](scripts/verify-article.ts) | 推文真实性、论文标题、DOI/arXiv/原文链接与图片核查（`bun run verify`） |
 | [`scripts/set-titles.ts`](scripts/set-titles.ts) | 15 字短标题校验与安全合并工具（`bun run titles`） |
 | [`scripts/wechat-article.ts`](scripts/wechat-article.ts) | 单篇独立发布命令行工具（`bun run article`） |
 | [`.env.example`](.env.example) | 环境变量配置模板（复制为 `.env` 即可快速定制你的账号与目录） |

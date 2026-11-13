@@ -45,7 +45,7 @@ export async function assertArticleEditor(session: EditorSession, timeoutMs = 15
       };
     })()`);
     const mode = evaluateEditorMessageType(last);
-    if (last.itemShowType === 8) throw new Error(mode.reason);
+    if (last.itemShowType === 8 || (!mode.supported && last.hasGalleryContainer)) throw new Error(mode.reason);
     if (mode.supported && last.isProseMirrorVisible && last.isEditable) return last;
     if (Date.now() - started >= timeoutMs) break;
     await sleep(250);

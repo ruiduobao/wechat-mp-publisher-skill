@@ -2,13 +2,15 @@
 
 本机已配置每日 `0 8,20 * * *`。07:00 / 17:00 独立产文任务只向 Z: 生成内容，08:00 / 20:00 任务负责读取 Muse 与本地来源并保存公众号草稿。两来源保持独立。
 
-任务先读取当前代码库 `SKILL.md` 和本说明，再执行：
+任务先读取当前代码库 `SKILL.md` 和本说明，再执行只读预检与前置真实性核查：
 
 ```bash
-node "C:/Users/Administrator/wechat-mp-publisher-skill/bin/launch-publisher.mjs" --check
+node "C:/Users/Administrator/wechat-mp-publisher-skill/bin/launch-publisher.mjs" --check --verify
 ```
 
-预检纯读，不建锁、不写历史/基线、不触碰浏览器。没有可执行工作就退出。仅能声称“PC 当前索引无新文件”，不能推断未连通的 Muse 远端没有内容。
+预检与核查纯读，不建锁、不写历史/基线、不触碰浏览器。没有可执行工作就退出。仅能声称“PC 当前索引无新文件”，不能推断未连通的 Muse 远端没有内容。
+
+**每次有同步文件时，第一件事就是核对推文真实性**：通过 `bun run verify` / `--check --verify` 核实论文是否存在、DOI (Crossref/doi.org) 与 arXiv 编号解析出的真实标题是否与推文一致、原文链接是否可达、本地图片无损坏。遇到 404 假 DOI、标题张冠李戴或幻觉残留直接阻断；遇到 403/无 DOI 警告时联网核查确认真实性后再同步。
 
 有就绪任务时：
 
