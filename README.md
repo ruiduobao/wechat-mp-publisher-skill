@@ -164,7 +164,7 @@ node bin/launch-publisher.mjs --help
 
 | 文件 / 目录 | 说明 |
 |---|---|
-| [`SKILL.md`](SKILL.md) | AI Agent 技能定义、执行顺序与验收标准 |
+| [`SKILL.md`](SKILL.md) / [`AGENTS.md`](AGENTS.md) | AI Agent 技能定义、执行规范与验收标准 |
 | [`bin/launch-publisher.mjs`](bin/launch-publisher.mjs) | 统一启动器（自动加载 `.env`、`--check` 映射、正式写入前执行 TypeScript 检查） |
 | [`scripts/batch-fast-wechat.ts`](scripts/batch-fast-wechat.ts) | 单窗口多标签批处理引擎、原生复制粘贴调度、保存与独立重开复验 |
 | [`scripts/draft-state.ts`](scripts/draft-state.ts) | 双源扫描、SHA-256 指纹、原子状态合并、进程互斥锁与候选 ID 防重 |
