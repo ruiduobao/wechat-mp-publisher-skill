@@ -81,6 +81,7 @@ node bin/launch-publisher.mjs --titles "C:/Users/Administrator/.agents/skills/we
 - Muse 来源 `F:\同步文件夹\公众号\每日推文` 与本地独立来源 `Z:\自媒体\公众号\每日推文` 保持分离且发布只读。缓存、状态、封面、模板、日志与截图留在私有目录。
 - 完整正文通过原生 HTML 复制粘贴交给微信编辑器，复制页仅包含本次内容，复制后关闭；这会覆盖系统剪贴板，不读取原剪贴板。粘贴后轮询等待整篇规范化文本真正变为新内容，防止读取旧正文快照误判丢占位符。
 - 逐图通过原生选区（带抖动短重试）替换唯一文字占位符，核对全篇文本精确差值并上传。残留占位符或选区不稳时停止，不直接改 `textContent` 或 `innerHTML` 假装修复。
+- **零缩进与零空行铁律**：渲染预处理自动剥离非代码块正文段落与列表行首多余缩进（空格/Tab/全角 `\u3000`/`&nbsp;`）、归零 `<p>`/`<ul>`/`<ol>`/`<li>` 的左右 `margin`/`padding`/`text-indent`（避免相对 H1 莫名右缩进），展开外层 `section.container` 并清除标签间空白节点；上传图片及插入名片后，通过原生 `Backspace`/`Delete` 按键清除正文内部、H1 后、图片前后及名片前的所有残余空段落。
 - 发现多个 H1 或 H1 包含实质正文时，报告 `needs-content-refresh`，按源文原 ID 重建。原生名片必须是真正 `mp-common-profile`，身份正确并居尾；可视 div 不能替代。
 
 现场规则见 [editor-reliability.md](references/editor-reliability.md)，按错误恢复见 [troubleshooting.md](references/troubleshooting.md)。
@@ -90,7 +91,7 @@ node bin/launch-publisher.mjs --titles "C:/Users/Administrator/.agents/skills/we
 保存取得 ID 后先保全 `saved-unverified`，再从独立新标签读取同一 ID（条件轮询等待正文、图片、封面及名片真实解码就绪）：
 
 - 首位唯一完整原标题 H1，作者和外题正确。
-- 正文文字与保存前一致，没有占位符、定位标记或本地图片路径。
+- 正文文字与保存前一致，没有占位符、定位标记或本地图片路径；独立重开校验确认**正文零空行且零异常段落缩进**（`emptyParagraphCount === 0` 且 `indentedParagraphCount === 0`）。
 - 图片数量准确且全部加载；首先比较合法 qpic `/0`/`/640` 规范化 URL，若微信保存时对同一素材去重或重签名导致 URL 变化，则以 32×32 RGBA 内存像素交叉 MAE 验证各位置内容与顺序完全匹配。不放宽错图或乱序。
 - 封面实际非空，末尾正确原生名片仍存在。
 

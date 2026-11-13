@@ -58,6 +58,8 @@ import {
   applyArticleContent,
   wechatImageIdentity,
   verifyReopenedImagesMatch,
+  cleanupEmptyParagraphsNatively,
+  inspectEditorLayoutHealth,
   type RenderArticleResult,
 } from './article-content.ts';
 import { assertArticleEditor } from './editor-mode.ts';
@@ -382,6 +384,7 @@ async function waitForNewTab(cdp: CdpConnection, initialIds: Set<string>, urlPat
 // -----------------------------------------------------------------------------
 export interface SaveNetworkResponse {
   ret: number;
+  errMsg?: string;
   appMsgId?: string;
   timestamp: number;
 }
@@ -393,6 +396,12 @@ async function installSaveNetworkHook(session: EditorSession): Promise<void> {
       window.__saveHookInstalled = true;
       window.__lastSaveResponse = null;
 
+      const isSaveActionUrl = (url) => {
+        if (!url || !url.includes('operate_appmsg')) return false;
+        if (url.includes('pre_load_')) return false;
+        return url.includes('sub=create') || url.includes('sub=update') || !url.includes('sub=');
+      };
+
       const origOpen = XMLHttpRequest.prototype.open;
       const origSend = XMLHttpRequest.prototype.send;
       XMLHttpRequest.prototype.open = function(method, url) {
@@ -400,12 +409,14 @@ async function installSaveNetworkHook(session: EditorSession): Promise<void> {
         return origOpen.apply(this, arguments);
       };
       XMLHttpRequest.prototype.send = function() {
-        if (this.__interceptUrl && this.__interceptUrl.includes('operate_appmsg')) {
+        if (isSaveActionUrl(this.__interceptUrl)) {
           this.addEventListener('load', function() {
             try {
               const res = JSON.parse(this.responseText);
+              const retRaw = res.base_resp ? res.base_resp.ret : res.ret;
               window.__lastSaveResponse = {
-                ret: res.base_resp ? res.base_resp.ret : res.ret,
+                ret: Number(retRaw),
+                errMsg: (res.base_resp && res.base_resp.err_msg) || res.msg || '',
                 appMsgId: String(res.appMsgId || res.appmsgid || ''),
                 timestamp: Date.now()
               };
@@ -421,11 +432,13 @@ async function installSaveNetworkHook(session: EditorSession): Promise<void> {
           const res = await origFetch.apply(this, arguments);
           try {
             const url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-            if (url.includes('operate_appmsg')) {
+            if (isSaveActionUrl(url)) {
               const clone = res.clone();
               clone.json().then(data => {
+                const retRaw = data.base_resp ? data.base_resp.ret : data.ret;
                 window.__lastSaveResponse = {
-                  ret: data.base_resp ? data.base_resp.ret : data.ret,
+                  ret: Number(retRaw),
+                  errMsg: (data.base_resp && data.base_resp.err_msg) || data.msg || '',
                   appMsgId: String(data.appMsgId || data.appmsgid || ''),
                   timestamp: Date.now()
                 };
@@ -455,7 +468,10 @@ async function waitForRealSaveNetworkResponse(
       })()
     `).catch(() => null);
 
-    if (netRes && netRes.ret === 0) {
+    if (netRes) {
+      if (netRes.ret !== 0) {
+        throw new Error(`微信保存草稿被服务端拒绝 (ret=${netRes.ret}): ${netRes.errMsg || '未知原因'}`);
+      }
       if (netRes.appMsgId && netRes.appMsgId.trim() !== '') {
         return netRes.appMsgId.trim();
       }
@@ -590,14 +606,17 @@ export async function connectOrCreateHomeSession(): Promise<ConnectedHome> {
   await cdp.send('Page.enable', {}, { sessionId: homeSid }).catch(() => {});
   await cdp.send('Runtime.enable', {}, { sessionId: homeSid }).catch(() => {});
 
-  const currentUrl = await evaluatePage<string>(homeSession, 'window.location.href');
-  if (!currentUrl.includes('/cgi-bin/home')) {
-    console.log(`[wechat-batch] 导航至公众号后台首页...`);
-    await evaluatePage(homeSession, `window.location.href = '${WECHAT_URL}cgi-bin/home?t=home/index'`);
-    await sleep(1200);
+  // 等待首页完成重定向和加载 (避免刚冷启动 Edge 时中途打断 /cgi-bin/home 302 跳转)
+  let isMenuReady = await waitForSelector(homeSession, '.new-creation__menu', 10_000);
+  if (!isMenuReady) {
+    const currentUrl = await evaluatePage<string>(homeSession, 'window.location.href');
+    if (!currentUrl.includes('/cgi-bin/home')) {
+      console.log(`[wechat-batch] 导航至公众号后台首页...`);
+      await evaluatePage(homeSession, `window.location.href = '${WECHAT_URL}cgi-bin/home?t=home/index'`);
+      await sleep(1500);
+    }
+    isMenuReady = await waitForSelector(homeSession, '.new-creation__menu', 18_000);
   }
-
-  const isMenuReady = await waitForSelector(homeSession, '.new-creation__menu', 25_000);
   if (!isMenuReady) {
     throw new Error('[wechat-batch] 公众号后台登录态已失效或首页加载超时，请在专用浏览器扫码续期后重试 (needs-attention)');
   }
@@ -868,8 +887,15 @@ export async function processSingleArticle(
       console.log(`[wechat-batch] ℹ️ 已配置 WECHAT_SKIP_PROFILE_CARD=1，跳过名片插入。`);
     }
 
+    // 7.5 保存前通过编辑器原生按键彻底清理多余空段落 (H1后、图片前后、正文内部、名片前)
+    const cleanedEmptyCount = await cleanupEmptyParagraphsNatively(editSession);
+    if (cleanedEmptyCount > 0) {
+      console.log(`[wechat-batch] 🧹 已通过原生按键清除 ${cleanedEmptyCount} 个多余空段落`);
+    }
+
     // 8. 保存前全要素快速 inspect，防止未关闭 modal 误点保存
     const preSaveInspect = await inspectEditorFeatures(editSession);
+    const preLayout = await inspectEditorLayoutHealth(editSession);
     const preCardOk = skipProfileCard || (
       preSaveInspect.profileCard.isRealMpCommonProfile &&
       preSaveInspect.profileCard.isAtEnd &&
@@ -878,8 +904,9 @@ export async function processSingleArticle(
     );
     if (!preSaveInspect.titleH1.exists || preSaveInspect.titleH1.count !== 1 ||
         !preSaveInspect.titleH1.isFirstElement || preSaveInspect.titleH1.text?.trim() !== item.title.trim() ||
-        !preSaveInspect.cover.hasCover || !preCardOk) {
-      throw new Error(`保存前预检失败: H1=${preSaveInspect.titleH1.exists}, 封面=${preSaveInspect.cover.hasCover}, 名片=${preSaveInspect.profileCard.exists}`);
+        !preSaveInspect.cover.hasCover || !preCardOk ||
+        preLayout.emptyParagraphCount > 0 || (!isRepairMode && preLayout.indentedParagraphCount > 0)) {
+      throw new Error(`保存前预检失败: H1=${preSaveInspect.titleH1.exists}, 封面=${preSaveInspect.cover.hasCover}, 名片=${preSaveInspect.profileCard.exists}, 空行=${preLayout.emptyParagraphCount}, 异常缩进=${preLayout.indentedParagraphCount}`);
     }
     const contentSnapshotExpression = `(() => {
       const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
@@ -1048,10 +1075,15 @@ export async function processSingleArticle(
         ? imgVerify.matched && reloadedFeatures.allImagesLoaded
         : (reloadedFeatures.imageUrls.length === expectedImageCount) && reloadedFeatures.allImagesLoaded && imgVerify.matched;
 
-      isAllVerified = h1Strict && cardStrict && coverStrict && authorStrict && titleStrict && imagesNotLost && contentPreserved;
+      const reopenLayout = await inspectEditorLayoutHealth(reopenSession);
+      const noEmptyParagraphs = reopenLayout.emptyParagraphCount === 0;
+      const noUnexpectedIndent = isRepairMode ? true : reopenLayout.indentedParagraphCount === 0;
+
+      isAllVerified = h1Strict && cardStrict && coverStrict && authorStrict && titleStrict && imagesNotLost && contentPreserved && noEmptyParagraphs && noUnexpectedIndent;
 
       console.log(`[wechat-batch] 严格复验报告 (独立重开标签页):
   - 正文文字和图片顺序: ${contentPreserved} (${imgVerify.method}${imgVerify.maxMae !== undefined ? `, maxMAE=${imgVerify.maxMae.toFixed(4)}` : ''}${imgVerify.reason ? `, reason=${imgVerify.reason}` : ''})
+  - 零空行与无异常缩进: ${noEmptyParagraphs && noUnexpectedIndent} (空行=${reopenLayout.emptyParagraphCount}, 异常缩进=${reopenLayout.indentedParagraphCount})
   - H1 匹配且首位唯一: ${h1Strict}
   - 名片组件且居尾端:   ${cardStrict}
   - 封面非空实际 URL:  ${coverStrict}
@@ -1090,10 +1122,10 @@ export async function processSingleArticle(
   } catch (err: any) {
     const errMsg = err?.message || String(err);
     console.error(`[wechat-batch] ❌ 本篇处理异常:`, errMsg);
-    if (!options.dryRun && errMsg.includes('unsupported-message-type') && item.appmsgid) {
+    if (!options.dryRun && (errMsg.includes('unsupported-message-type') || errMsg.includes('ret=320005')) && item.appmsgid) {
       try {
         recordUnsupportedDraft(item.id, item.appmsgid, errMsg);
-        console.warn(`[wechat-batch] 💾 已将 ${item.id} (${item.appmsgid}) 标记为已知非普通长文原稿，后续全量同步将自动跳过并保留原稿`);
+        console.warn(`[wechat-batch] 💾 已将 ${item.id} (${item.appmsgid}) 标记保留原稿，后续全量同步将自动跳过`);
       } catch {}
     }
     // 微信可能在手动保存前自动落库。先重开确认文章身份并保全 ID，避免失败重跑再建副本。

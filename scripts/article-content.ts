@@ -502,13 +502,34 @@ export function prepareMarkdownWithAbsoluteImages(
   // 3. 保护代码块
   const { maskedMarkdown, restore } = protectCodeBlocks(text);
 
+  // 3.5 清理源 Markdown 非代码块中的莫名段落前导缩进 (空格/Tab/全角空格/不间断空格) 与多余连续空行
+  const cleanedMaskedMarkdown = maskedMarkdown
+    .split('\n')
+    .map((line) => {
+      // 保留围栏代码占位符行
+      if (line.includes('\u0000CODEBLOCK_')) return line;
+      // 保留列表嵌套合法缩进 (如 "  - " 或 "  1. ")，但清理其正文前的全角/不间断空格
+      if (/^[ \t]*([-*+]|\d+\.)[ \t]+/.test(line)) {
+        return line.replace(/^([ \t]*(?:[-*+]|\d+\.))[ \t\u3000\u00A0]+/, '$1 ');
+      }
+      // 引用块行：清理 > 后多余缩进空格与全角空格，保留非字段行尾部合法两空格
+      if (/^[ \t\u3000\u00A0]*>/.test(line)) {
+        return line.replace(/^[ \t\u3000\u00A0]*>[ \t\u3000\u00A0]*/, '> ');
+      }
+      // 普通段落/标题：彻底去除行首莫名缩进 (空格/Tab/\u3000/\u00A0)
+      return line.replace(/^[ \t\u3000\u00A0]+/, '');
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\n+|\n+$/g, '');
+
   // 4. 提取非代码块中的所有图片
-  const extractedImages = extractMarkdownImages(maskedMarkdown);
+  const extractedImages = extractMarkdownImages(cleanedMaskedMarkdown);
   const referencedImages: Array<{ original: string; resolvedPath: string }> = [];
   const existingCdnImages: string[] = [];
   const missingImages: string[] = [];
 
-  let replacedText = maskedMarkdown;
+  let replacedText = cleanedMaskedMarkdown;
 
   for (const img of extractedImages) {
     const rawUrl = img.cleanUrl;
@@ -588,6 +609,69 @@ export function prepareMarkdownWithAbsoluteImages(
  * - 隔离缓存渲染，自动将相对图片转为带尖括号保护的绝对路径；
  * - 返回 cleanup 回调安全清理临时转换文件。
  */
+export function sanitizeWechatHtml(rawHtml: string): string {
+  // 保护 <pre> 代码块不被空白和缩进规则修改
+  const preBlocks: string[] = [];
+  let html = rawHtml
+    .replace(/[\u200B\uFEFF]/g, '')
+    .replace(/<pre\b[\s\S]*?<\/pre>/gi, (m) => {
+      const idx = preBlocks.length;
+      preBlocks.push(m);
+      return `\u0000PREBLOCK_${idx}\u0000`;
+    });
+
+  // 1. 清除任意 <p>, <li>, <ul>, <ol> 上的莫名水平缩进 (margin-left/right, padding-left, text-indent, 左右 8px margin)
+  html = html.replace(/<p(\s+[^>]*)?>/gi, (full, attrs = '') => {
+    const styleMatch = attrs.match(/style="([^"]*)"/i);
+    if (!styleMatch) return full;
+    let style = styleMatch[1]!
+      .replace(/margin\s*:\s*[^;"]+\s+8px\s*;?/gi, 'margin: 0 0 1.2em 0;')
+      .replace(/(?:margin-left|margin-right|padding-left|text-indent)\s*:[^;"]*;?/gi, '')
+      .trim();
+    if (style && !style.endsWith(';')) style += ';';
+    style += ' margin-left: 0; padding-left: 0; text-indent: 0;';
+    return full.replace(styleMatch[0]!, `style="${style.trim()}"`);
+  });
+
+  html = html.replace(/<(ul|ol)(\s+[^>]*)?>/gi, (full, _tag, attrs = '') => {
+    const styleMatch = attrs.match(/style="([^"]*)"/i);
+    if (!styleMatch) return full;
+    let style = styleMatch[1]!
+      .replace(/(?:margin-left|padding-left|text-indent)\s*:[^;"]*;?/gi, '')
+      .trim();
+    if (style && !style.endsWith(';')) style += ';';
+    style += ' margin-left: 0; padding-left: 0; text-indent: 0;';
+    return full.replace(styleMatch[0]!, `style="${style.trim()}"`);
+  });
+
+  html = html.replace(/<li(\s+[^>]*)?>/gi, (full, attrs = '') => {
+    const styleMatch = attrs.match(/style="([^"]*)"/i);
+    if (!styleMatch) return full;
+    let style = styleMatch[1]!
+      .replace(/margin\s*:\s*0\.5em\s+8px\s*;?/gi, 'margin: 0.45em 0;')
+      .replace(/(?:margin-left|margin-right|padding-left|text-indent)\s*:[^;"]*;?/gi, '')
+      .trim();
+    if (style && !style.endsWith(';')) style += ';';
+    style += ' margin-left: 0; padding-left: 0; text-indent: 0;';
+    return full.replace(styleMatch[0]!, `style="${style.trim()}"`);
+  });
+
+  // 2. 清除块级段落与列表项开头的 &nbsp; / 全角空格 \u3000 / 多余前导空格 (不碰代码标签)
+  html = html.replace(/(<(?:p|li|h[1-6])(?:\s+[^>]*)?>)(?:&nbsp;|&#160;|[\s\u00A0\u3000])+/gi, '$1');
+  html = html.replace(/(<(?:p|li)(?:\s+[^>]*)?>(?:<(?:span|em|strong|b|i)(?:\s+[^>]*)?>)+)(?:&nbsp;|&#160;|[\s\u00A0\u3000])+/gi, '$1');
+
+  // 3. 清除带任意属性的空 <p> / <div> 标签 (仅含 <br ...>, <span ...>, &nbsp; 或空白)
+  html = html.replace(/<(p|div)(?:\s+[^>]*)?>\s*(?:<span(?:\s+[^>]*)?>\s*(?:<br(?:\s+[^>]*)?\s*\/?>|&nbsp;|&#160;|[\s\u00A0\u3000])*\s*<\/span>|<br(?:\s+[^>]*)?\s*\/?>|&nbsp;|&#160;|[\s\u00A0\u3000])*\s*<\/\1>/gi, '');
+
+  // 4. 清除块级标签之间以及 <section> 内部首尾的换行缩进空白，防止粘贴进微信编辑器变成空段落
+  html = html
+    .replace(/(<\/(?:p|section|blockquote|ul|ol|li|h[1-6]|div)>)\s+(?=<)/gi, '$1')
+    .replace(/(<(?:section|div|ul|ol|blockquote)(?:\s+[^>]*)?>)\s+(?=<)/gi, '$1')
+    .replace(/\s+(<\/(?:section|div|ul|ol|blockquote)>)/gi, '$1');
+
+  return html.replace(/\u0000PREBLOCK_(\d+)\u0000/g, (_m, idx) => preBlocks[Number(idx)] ?? '');
+}
+
 export async function renderArticleContent(
   sourcePath: string,
   cacheRootOrOptions?: string | RenderArticleOptions
@@ -642,12 +726,7 @@ export async function renderArticleContent(
       }
     }
 
-    let html = fs.readFileSync(parsed.htmlPath, 'utf-8');
-
-    // 清除零宽保护符并清理无用空段落标签
-    html = html.replace(/\u200B/g, '');
-    html = html.replace(/<p>\s*(<br\s*\/?>|&nbsp;|\s*)*<\/p>/gi, '');
-    html = html.replace(/<div>\s*(<br\s*\/?>|&nbsp;|\s*)*<\/div>/gi, '');
+    let html = sanitizeWechatHtml(fs.readFileSync(parsed.htmlPath, 'utf-8'));
 
     // 图片二次存在性确认
     const contentImages: ContentImageItem[] = (parsed.contentImages || []).map((img) => ({
@@ -951,9 +1030,11 @@ export async function injectHtmlIntoProseMirror(
   // 2. 前置调用真实前台激活与物理点击定位，确保焦点脱离 BODY# 真正进入 .ProseMirror
   await ensureEditorFocusedAndActive(session);
 
+  const sanitizedHtml = sanitizeWechatHtml(html);
+
   const preparedHtml = await evaluatePage<string>(session, `(() => {
     const template = document.createElement('template');
-    template.innerHTML = ${JSON.stringify(html)};
+    template.innerHTML = ${JSON.stringify(sanitizedHtml)};
     const replacements = ${JSON.stringify(replacements)};
     for (const img of Array.from(template.content.querySelectorAll('img'))) {
       const rep = replacements.find(r => r.placeholder === img.getAttribute('src') || r.localPath === img.getAttribute('data-local-path'));
@@ -962,6 +1043,56 @@ export async function injectHtmlIntoProseMirror(
     const output = template.content.querySelector('#output');
     const wrapper = document.createElement('div');
     wrapper.appendChild(output ? output.cloneNode(true) : template.content.cloneNode(true));
+    // 若外层包裹了单个 section.container，先继承排版字号行高并展开，避免 H1 后产生 ProseMirror 隔离空段
+    const outerContainer = wrapper.querySelector('section.container');
+    if (outerContainer) {
+      const cFont = outerContainer.style.fontFamily;
+      const cSize = outerContainer.style.fontSize;
+      const cLine = outerContainer.style.lineHeight;
+      for (const child of Array.from(outerContainer.children)) {
+        if (child.tagName === 'P' || child.tagName === 'UL' || child.tagName === 'OL' || child.tagName === 'BLOCKQUOTE') {
+          if (cFont && !child.style.fontFamily) child.style.fontFamily = cFont;
+          if (cSize && !child.style.fontSize) child.style.fontSize = cSize;
+          if (cLine && !child.style.lineHeight) child.style.lineHeight = cLine;
+        }
+      }
+      const parent = outerContainer.parentElement;
+      if (parent) {
+        while (outerContainer.firstChild) parent.insertBefore(outerContainer.firstChild, outerContainer);
+        outerContainer.remove();
+      }
+    }
+    if (output && wrapper.firstElementChild?.id === 'output') {
+      const outEl = wrapper.firstElementChild;
+      while (outEl.firstChild) wrapper.insertBefore(outEl.firstChild, outEl);
+      outEl.remove();
+    }
+    // 清理空容器、块间纯空白节点以及非引用块的水平缩进/前导不间断空格
+    for (const container of Array.from(wrapper.querySelectorAll('section, div, ul, ol, blockquote'))) {
+      if (container.closest('pre')) continue;
+      for (const child of Array.from(container.childNodes)) {
+        if (child.nodeType === 3 && !(child.textContent || '').replace(/[\\s\\u00A0\\u200B-\\u200D\\uFEFF]/g, '')) {
+          child.remove();
+        }
+      }
+    }
+    for (const el of Array.from(wrapper.querySelectorAll('p, div, section'))) {
+      if (el.closest('pre') || el.querySelector('img, mp-common-profile, svg, video, iframe, table, hr, pre')) continue;
+      const text = (el.textContent || '').replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
+      if (!text) el.remove();
+    }
+    for (const block of Array.from(wrapper.querySelectorAll('p, li, ul, ol'))) {
+      if (block.closest('pre')) continue;
+      if (block.tagName === 'P' || block.tagName === 'LI') {
+        block.style.marginLeft = '0px';
+        block.style.marginRight = '0px';
+        block.style.paddingLeft = '0px';
+        block.style.textIndent = '0px';
+      } else {
+        block.style.marginLeft = '0px';
+        block.style.paddingLeft = '0px';
+      }
+    }
     const titleHtml = ${JSON.stringify(originalTitle ? `<h1>${escapeHtml(originalTitle)}</h1>` : '')};
     if (titleHtml) wrapper.insertAdjacentHTML('afterbegin', titleHtml);
     return wrapper.innerHTML;
@@ -1100,6 +1231,21 @@ export async function waitForTargetImageLoaded(
       await new Promise(resolve => setTimeout(resolve, 120));
       const markerRemoved = await evaluatePage<boolean>(session, `!document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)}).textContent.includes(${JSON.stringify(`⟦${anchorId}⟧`)})`);
       if (!markerRemoved) throw new Error('[article-content] 图片定位标记未被编辑器删除，未保存');
+      // 占位符独占一行时，删除标记文字会留下一个空 <p>，再通过一次原生 Backspace 消除该空段落
+      const emptyBlockNeedCollapse = await evaluatePage<boolean>(session, `(() => {
+        const sel = typeof getSelection === 'function' ? getSelection() : null;
+        const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+        if (!sel || !sel.rangeCount || !editor || typeof sel.anchorNode?.parentElement?.closest !== 'function') return false;
+        const block = (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement).closest('p, div');
+        if (!block || block === editor || !editor.contains(block)) return false;
+        if (block.querySelector('img:not(.ProseMirror-separator), mp-common-profile, iframe, video, table')) return false;
+        return !(block.textContent || '').replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
+      })()`).catch(() => false);
+      if (emptyBlockNeedCollapse) {
+        await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, { sessionId: session.sessionId });
+        await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, { sessionId: session.sessionId });
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
       await evaluatePage(session, `delete window[${JSON.stringify(anchorId)}]`);
       return { ok: true, src: state.src };
     }
@@ -1174,6 +1320,162 @@ export async function removeExtraEmptyLineAfterImage(session: EditorSession): Pr
   );
 
   return Boolean(result);
+}
+
+export interface EditorLayoutHealth {
+  emptyParagraphCount: number;
+  indentedParagraphCount: number;
+  emptyLocations: string[];
+  indentedSamples: string[];
+}
+
+/**
+ * 原生清理微信 ProseMirror 编辑器中残留的多余空段落 (位于正文内部、H1后、图片前后或名片前)
+ * 绝不直接调用 el.remove() 伪造清理，完全通过选中与原生 Backspace/Delete 由模型移除。
+ */
+export async function cleanupEmptyParagraphsNatively(session: EditorSession, maxIterations = 25): Promise<number> {
+  let removed = 0;
+  let skipIndex = 0;
+
+  for (let step = 0; step < maxIterations; step++) {
+    const targetInfo = await evaluatePage<{
+      found: boolean;
+      useDelete: boolean;
+      beforeCount: number;
+    }>(session, `(() => {
+      const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+      if (!editor) return { found: false, useDelete: false, beforeCount: 0 };
+      const card = editor.querySelector('mp-common-profile');
+      const empties = Array.from(editor.querySelectorAll('p, div')).filter(el => {
+        if (el === editor || el.closest('mp-common-profile, pre, code, blockquote')) return false;
+        if (el.querySelector('img:not(.ProseMirror-separator), mp-common-profile, svg, video, iframe, table, hr, pre')) return false;
+        const text = (el.textContent || '').replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
+        if (text.length > 0) return false;
+        // 若位于名片之后且是尾部唯一的装饰空段，保留给 ProseMirror 维持选区
+        if (card && (card.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+          return false;
+        }
+        return true;
+      });
+      if (${skipIndex} >= empties.length) return { found: false, useDelete: false, beforeCount: empties.length };
+      const el = empties[${skipIndex}];
+      el.scrollIntoView({ block: 'center' });
+      editor.focus();
+      const sel = getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      const prev = el.previousElementSibling;
+      const useDelete = !prev || prev.tagName === 'H1' || !!prev.querySelector?.('img:not(.ProseMirror-separator), mp-common-profile');
+      return { found: true, useDelete, beforeCount: empties.length };
+    })()`).catch(() => ({ found: false, useDelete: false, beforeCount: 0 }));
+
+    if (!targetInfo.found) break;
+
+    const sendKey = async (key: 'Backspace' | 'Delete', code: number) => {
+      await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode: code }, { sessionId: session.sessionId });
+      await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: code }, { sessionId: session.sessionId });
+      await new Promise(resolve => setTimeout(resolve, 90));
+    };
+
+    if (targetInfo.useDelete) {
+      await sendKey('Delete', 46);
+    } else {
+      await sendKey('Backspace', 8);
+    }
+
+    const afterCount = await evaluatePage<number>(session, `(() => {
+      const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+      if (!editor) return 0;
+      const card = editor.querySelector('mp-common-profile');
+      return Array.from(editor.querySelectorAll('p, div')).filter(el => {
+        if (el === editor || el.closest('mp-common-profile, pre, code, blockquote')) return false;
+        if (el.querySelector('img:not(.ProseMirror-separator), mp-common-profile, svg, video, iframe, table, hr, pre')) return false;
+        const text = (el.textContent || '').replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
+        if (text.length > 0) return false;
+        if (card && (card.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) return false;
+        return true;
+      }).length;
+    })()`).catch(() => targetInfo.beforeCount);
+
+    if (afterCount < targetInfo.beforeCount) {
+      removed += (targetInfo.beforeCount - afterCount);
+      continue;
+    }
+
+    // 换用另一种删除键再试一次 (针对紧邻不可编辑 section 的空行)
+    if (targetInfo.useDelete) {
+      await sendKey('Backspace', 8);
+    } else {
+      await sendKey('Delete', 46);
+    }
+
+    const retryCount = await evaluatePage<number>(session, `(() => {
+      const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+      if (!editor) return 0;
+      const card = editor.querySelector('mp-common-profile');
+      return Array.from(editor.querySelectorAll('p, div')).filter(el => {
+        if (el === editor || el.closest('mp-common-profile, pre, code, blockquote')) return false;
+        if (el.querySelector('img:not(.ProseMirror-separator), mp-common-profile, svg, video, iframe, table, hr, pre')) return false;
+        const text = (el.textContent || '').replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
+        if (text.length > 0) return false;
+        if (card && (card.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) return false;
+        return true;
+      }).length;
+    })()`).catch(() => targetInfo.beforeCount);
+
+    if (retryCount < targetInfo.beforeCount) {
+      removed += (targetInfo.beforeCount - retryCount);
+    } else {
+      skipIndex++;
+    }
+  }
+
+  return removed;
+}
+
+export async function inspectEditorLayoutHealth(session: EditorSession): Promise<EditorLayoutHealth> {
+  return evaluatePage<EditorLayoutHealth>(session, `(() => {
+    const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+    if (!editor) return { emptyParagraphCount: 0, indentedParagraphCount: 0, emptyLocations: [], indentedSamples: [] };
+    const card = editor.querySelector('mp-common-profile');
+    const emptyLocations = [];
+    const indentedSamples = [];
+
+    for (const el of Array.from(editor.querySelectorAll('p, div, li'))) {
+      if (el === editor || el.closest('mp-common-profile, pre, code')) continue;
+      const hasMedia = !!el.querySelector('img:not(.ProseMirror-separator), mp-common-profile, svg, video, iframe, table, hr, pre');
+      const rawText = el.textContent || '';
+      const trimmed = rawText.replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
+      if (!hasMedia && trimmed.length === 0 && el.tagName !== 'LI' && !el.closest('blockquote')) {
+        if (!(card && (card.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING))) {
+          const prevText = (el.previousElementSibling?.textContent || '').trim().slice(0, 20);
+          emptyLocations.push(el.tagName + ' after ' + JSON.stringify(prevText));
+        }
+        continue;
+      }
+
+      if ((el.tagName === 'P' && !el.closest('blockquote')) || el.tagName === 'LI') {
+        const cs = getComputedStyle(el);
+        const ti = parseFloat(cs.textIndent) || 0;
+        const ml = parseFloat(cs.marginLeft) || 0;
+        const pl = parseFloat(cs.paddingLeft) || 0;
+        const hasLeadingSpace = /^[\\u3000\\u00A0]|^ {2,}/.test(rawText);
+        if (ti > 2 || ml > 2 || pl > 2 || hasLeadingSpace) {
+          indentedSamples.push(el.tagName + '(ti=' + ti + ',ml=' + ml + ',pl=' + pl + ',lead=' + JSON.stringify(rawText.slice(0, 8)) + ')');
+        }
+      }
+    }
+
+    return {
+      emptyParagraphCount: emptyLocations.length,
+      indentedParagraphCount: indentedSamples.length,
+      emptyLocations: emptyLocations.slice(0, 10),
+      indentedSamples: indentedSamples.slice(0, 10),
+    };
+  })()`);
 }
 
 /**
