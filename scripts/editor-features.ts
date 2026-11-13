@@ -25,10 +25,12 @@ export const COVER_PICKER_DIALOG_SELECTOR = '.weui-desktop-dialog_img-picker';
 export const PROFILE_TOOLBAR_BUTTON_SELECTOR = '#js_editor_insertProfile span, #js_editor_insertProfile';
 export const PROFILE_DIALOG_SELECTOR = '.profile_dialog';
 
-export const RUIDUOBAO_TARGET_DATA_ID = 'MzAwODU3NDc2Nw==';
-export const RUIDUOBAO_TARGET_NICKNAME = '锐多宝';
-export const RUIDUOBAO_DESC_KEYWORD = '原名:遥感之家';
-export const EXCLUDED_NICKNAMES = ['锐多宝的地理空间'];
+export const RUIDUOBAO_TARGET_DATA_ID = process.env.WECHAT_PROFILE_DATA_ID || 'MzAwODU3NDc2Nw==';
+export const RUIDUOBAO_TARGET_NICKNAME = process.env.WECHAT_PROFILE_NAME || '锐多宝';
+export const RUIDUOBAO_DESC_KEYWORD = process.env.WECHAT_PROFILE_DESC_KEYWORD ?? '原名:遥感之家';
+export const EXCLUDED_NICKNAMES = process.env.WECHAT_PROFILE_EXCLUDED
+  ? process.env.WECHAT_PROFILE_EXCLUDED.split(',').map((s) => s.trim()).filter(Boolean)
+  : ['锐多宝的地理空间'];
 
 export interface EditorSession {
   cdp: {

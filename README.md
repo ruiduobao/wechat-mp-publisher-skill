@@ -1,93 +1,189 @@
-# 微信公众号草稿编辑技能
+# WeChat MP Publisher Skill
 
-把 Markdown 文章保存到微信公众号草稿箱，支持已有草稿的正文更新、图片上传、完整原题 H1、作者、封面和原生公众号名片。通过宝玉 Chrome CDP 路线复用本机浏览器登录态，仅保存草稿。
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/Node-%3E%3D20-green.svg" alt="Node" />
+  <img src="https://img.shields.io/badge/Bun-%3E%3D1.4-orange.svg" alt="Bun" />
+  <img src="https://img.shields.io/badge/TypeScript-5.x-3178C6.svg" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/Protocol-Chrome%20CDP-red.svg" alt="Chrome CDP" />
+  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome" /></a>
+</p>
 
-统一入口是 `bin/launch-publisher.mjs`。旧的批处理和同步入口转发到同一套状态引擎，避免多份扫描器各自维护文章映射。
+一个面向 **个人自媒体创作者、科研团队及 AI Agent（ZCode / Claude Code / Codex）** 的开源微信公众号 Markdown 排版与草稿箱自动录入技能。
 
-## 安装与运行
+通过 **Chrome/Edge DevTools Protocol (CDP)** 原生驱动本地浏览器登录态：**无需企业认证、无需配置公众号 AppID/AppSecret、无需公网服务器 IP 白名单**，自动完成从本地 Markdown 到微信公众号草稿箱的全流程写入与保存后物理重开复验。
 
-本轮现场验证环境为 Windows、Edge、Node.js 24 和 Bun 1.4。其它平台尚未完成同等现场验证。
+> **安全边界**：本工具**仅保存草稿（Drafts Only）**，绝不代替用户执行发表、群发或通知关注者。所有文章原文、草稿状态、Cookies 与测试截图均与源码物理隔离，不进入公开仓库。
+
+---
+
+## 核心特性
+
+- **双层标题架构**：列表外显标题支持 ≤15 字语义短标题覆写（`--titles` / `bun run titles`），避免移动端被截断；正文首位始终保留完整学术/长文 `<h1>` 原标题，不截断、不重复。
+- **原生 HTML 复制粘贴与选区防抖**：在任务自有临时标签准备排版 HTML 并原生触发复制粘贴，轮询等待新正文真正替换旧正文；逐张通过带选区抖动重试的 `Input.insertText` 替换占位符，严禁直接修改正文 DOM 假冒模型更新。
+- **高清原图 CDP 直传与像素顺位校验**：自动转换大于 1MB 或非标准格式（如 WebP）图片，直接调用 `DOM.setFileInputFiles` 上传为微信官方 CDN 素材；保存重开后优先核对合法 qpic 域名 `/0`、`/640` 尺寸归一化，若微信去重或重签名改变 URL 路径，自动以 **32×32 RGBA 内存像素交叉 MAE** 检验内容与顺序无误。
+- **封面与官方原生名片**：支持正文首图裁剪封面及零正文图文章独立封面；支持插入与验证微信官方原生 `<mp-common-profile>` 名片组件居于正文末尾（新用户也可通过 `.env` 设为 `WECHAT_SKIP_PROFILE_CARD=1` 先跳过名片快速跑通）。
+- **保存后独立新标签物理重开复验**：保存取得 `appmsgid` 后立即持久化保全为 `saved-unverified`，关闭编辑页后新建独立标签页拉取同一草稿，严格核验文字、图片顺序与加载、首位唯一 H1、作者、外题、封面及名片 7 项指标，全部达标才推进指纹。
+- **双源增量扫描与消息类型守卫**：支持独立扫描本地目录与外部同步目录（如 Syncthing 只读源），按内容与图片 SHA-256 指纹增量更新；自动识别图片轮播消息（`item_show_type=8`）等非普通长文稿件并安全拦截，不破坏原稿。
+
+---
+
+## 新用户 5 分钟快速上手
+
+本轮完整现场实测环境为 **Windows + Edge + Node.js ≥ 20 + Bun ≥ 1.4**（macOS/Linux 需保证已安装 Chrome/Edge 并自行适配测试）。
+
+### 第 1 步：准备运行环境
+
+1. 安装 [Node.js](https://nodejs.org/)（≥ 20）
+2. 安装 [Bun](https://bun.sh/)（≥ 1.4）：
+   - Windows PowerShell：`powershell -c "irm bun.sh/install.ps1 | iex"`
+   - macOS / Linux：`curl -fsSL https://bun.sh/install | bash`
+3. 确保本机已安装 **Microsoft Edge** 或 **Google Chrome**。
+
+### 第 2 步：克隆仓库与安装依赖
 
 ```bash
 git clone https://github.com/ruiduobao/wechat-mp-publisher-skill.git
 cd wechat-mp-publisher-skill
 bun install
-bun run typecheck
-bun run test
-node bin/launch-publisher.mjs --check
 ```
 
-`--check` 等价于 `--dry-run`：只读扫描来源与状态，不写历史、锁、基线，不连接浏览器。缺少语义短题时列出 `needs-title` 并继续预检其它文章；正式写入仍严格校验标题。正式运行前启动器自动执行 TypeScript 检查，失败即停止。
-
-此仓库是已配置账号的运行代码，首次克隆仍需核对来源、私有状态路径、专用浏览器及名片配置。基线不存在时，当前已扫描文章会被视为待核对历史，避免将已有文章重新建稿。不要为绕过这一保护而清空真实基线。完整操作步骤见[日常操作手册](references/operations.md)。
+验证离线环境（类型检查 + 单元测试）：
 
 ```bash
-# 只读预检、关键词查找或查看最新推文
+bun run typecheck
+bun run test
+```
+
+### 第 3 步：创建个人 `.env` 配置（无需改动源码）
+
+复制仓库根目录的配置模板 [`.env.example`](.env.example) 为 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+打开 `.env`，按你的实际需求修改这几项即可：
+
+```dotenv
+# 1. 你的 Markdown 推文存放目录（目录内按 YYYYMMDD_HHMM 批次子文件夹存放 01_xxx.md）
+WECHAT_LOCAL_ROOT=./my-articles
+WECHAT_MUSE_ROOT=./my-external-articles
+
+# 2. 状态库、锁、缓存与短标题映射保存位置（放在源码仓库外的私有目录或被 gitignore 的目录）
+WECHAT_HISTORY_FILE=./private-data/wechat-draft-history.json
+WECHAT_BASELINE_FILE=./private-data/wechat-legacy-baseline.json
+WECHAT_LOCK_FILE=./private-data/wechat-publisher.lock
+WECHAT_STATE_CACHE_DIR=./private-data/cache
+WECHAT_TITLES_FILE=./private-data/titles-override.json
+WECHAT_COVER_OVERRIDES_FILE=./private-data/cover-overrides.json
+
+# 3. 你的公众号作者名；首次跑通可先设 WECHAT_SKIP_PROFILE_CARD=1 跳过文末名片
+WECHAT_AUTHOR=你的作者名
+WECHAT_SKIP_PROFILE_CARD=1
+```
+
+> 准备一篇测试文章：在 `./my-articles/20261113_1200/` 下放一个 `01_测试文章.md`（开头写 `# 完整原标题`，正文带 1 张本地图片 `./fig1.png` 以便自动选作封面）。
+> 如果这是你第一次在该目录下全新初始化且希望把目录里已有文章纳入新草稿管理，先放好文章再首次运行或先用单篇命令测试（注意：若没有 `wechat-legacy-baseline.json`，首次扫描会将当时已存在文章标记为待核对基线防重；先在空目录建好 `baseline.json` 写入 `[]` 再放入测试文章即可视作新文章创建）。
+
+### 第 4 步：只读预检与设置短标题
+
+```bash
+# 1. 只读预检（不写状态、不启浏览器）
 node bin/launch-publisher.mjs --check
-node bin/launch-publisher.mjs --check --search "GEM-15"
+
+# 2. 按关键词检索或查看最新一篇
 node bin/launch-publisher.mjs --check --latest
 
-# 安全合并 ≤15 字语义短标题到私有 titles-override.json
-bun run titles "muse:20261113_1105:01=GEM-15全球15米高程模型"
+# 3. 为长标题文章设置 ≤15 字的列表短标题（自动检查字数并安全合并到 titles-override.json）
+bun run titles "local:20261113_1200:01=我的测试短标题"
+```
 
-# 单篇按已识别的文章身份处理，已有 appmsgid 时原地更新
-node bin/launch-publisher.mjs --id muse:20261111_2020:01 --title-override "语义短标题"
+### 第 5 步：首次扫码登录并推送到草稿箱
 
-# 仅修补已有普通长文的标题、作者、封面、名片
-node bin/launch-publisher.mjs --repair --id <articleId>
+```bash
+# 运行单篇发布或批量同步（正式写入前自动执行 tsc --noEmit）
+node bin/launch-publisher.mjs --latest 1 --titles ./private-data/titles-override.json
+```
 
-# 明确重建已有普通长文的完整正文与图片
-node bin/launch-publisher.mjs --refresh-content --id <articleId>
+- 引擎会自动以独立脱管进程启动带调试端口的专用浏览器（使用隔离的 Profile，**不会关闭或影响你的日常浏览器**）。
+- 首次运行若未登录，请在弹出的专用浏览器中用微信扫码登录公众平台后台，登录后重新运行上面的命令即可；登录态（Cookies）会在专用 Profile 内持久保留直到平台过期。
+- 完成后前往公众号后台「草稿箱」，即可看到排版精美、带封面与高清图片的草稿。
 
-# 批量处理，使用私有外题映射 articleId -> 短标题
-node bin/launch-publisher.mjs --titles <private-titles.json>
+---
+
+## 常用命令行速查
+
+所有正式入口统一通过 `bin/launch-publisher.mjs`（正式写入前自动运行 TypeScript 检查）：
+
+```bash
+# 只读演练与查找
+node bin/launch-publisher.mjs --check                         # 全量扫描并列出待办项与缺标题摘要
+node bin/launch-publisher.mjs --check --search "关键词"       # 按 ID/文件名/标题/正文搜索（含已跳过项）
+node bin/launch-publisher.mjs --check --latest 3              # 查看最新 3 篇状态
+
+# 短标题管理（<= 15 Unicode 字符，自动合并写盘）
+bun run titles "<articleId>=<≤15字短标题>"
+bun run titles --list
+
+# 正式写入草稿箱（仅保存草稿）
+node bin/launch-publisher.mjs --id <articleId> --title-override "短标题"   # 单篇智能处理（新建/更新/跳过）
+node bin/launch-publisher.mjs --repair --id <articleId>                    # 仅原地修补 H1/作者/封面/名片
+node bin/launch-publisher.mjs --refresh-content --id <articleId>           # 在原草稿上按源文重建完整正文与图片
+node bin/launch-publisher.mjs --titles "<path/to/titles-override.json>"    # 批量同步就绪文章
+
+# 轻量单篇脚本（直接指定本地单个 Markdown 文件快速推送草稿）
+bun run article --markdown "path/to/post.md" --title "短标题" --author "作者" --submit
+
+# 查看完整 CLI 参数
 node bin/launch-publisher.mjs --help
 ```
 
-本账号新列表标题按文章语义提炼至 15 字以内。正文开头始终保留完整原标题 H1。旧外题默认保留，确认有误时显式指定新标题。`articleId` 是 `source:batch:prefix`，与微信数字 `appmsgid` 不同。
+---
 
-## 实际编辑与验收
+## 作为 AI Agent Skill 安装（ZCode / Claude Code）
 
-- 复用专用 Profile 和登录主页，按 Profile 动态查找调试端口；未启动时自动以脱管常驻进程拉起专用浏览器，绝不关闭用户其它 Edge；每篇仅管理本任务的编辑、复制和复验标签。
-- 写入前确认准确的正文 `.rich_media_content .ProseMirror` 可见且可编辑。图片轮播消息会留有隐藏的长文编辑器，不能将它当成空稿。
-- 完整正文先在任务自有空白标签中准备，再用原生复制和粘贴键交给微信编辑器处理。检查真实 HTML 粘贴事件，轮询等待规范化新正文真正替代旧正文，避免读取旧内容快照误报丢占位符。
-- 本地正文图逐个上传，通过带选区抖动重试的原生选区插入唯一标记并检验全篇差值，在准确位置核验新图为已加载的微信 CDN 素材。定位文字通过原生退格删除；保存前拒绝残留标记。
-- 封面可以复用有效封面、选择正文图或使用独立文件。无正文图合法，封面不插进正文充数。
-- 名片要求真正的 `mp-common-profile`，账号身份正确，位于正文末尾。
-- 保存取得 ID 后立即保全为 `saved-unverified`，随后独立新标签条件轮询等待同一 ID 加载完成，检查正文文字、图片数量与加载、唯一首位 H1、作者、外题、封面和原生名片。除了核对合法 qpic `/0` 与 `/640` 尺寸归一化外，若微信服务端保存时因素材去重或重签名改变 URL 路径，采用 32×32 RGBA 内存像素交叉 MAE 验证顺序与内容一致性。
+本仓库根目录自带完整规范的 [`SKILL.md`](SKILL.md) 与 `references/` 手册，可直接安装为通用 Agent 技能：
 
-按钮、toast、编辑态 DOM 和保存回包均不能单独算成功。完整正文复验通过才记录已应用指纹；元数据修复不会把源正文标为已应用。未完成全量更新会持久化待完成标记，重跑继续原稿全量更新；自动保存身份尚未确认时先保全候选 ID，阻止再次新建。
+1. 将仓库克隆到本机固定目录（例如 `~/wechat-mp-publisher-skill`）；
+2. 在你的用户技能目录建立符号链接到该仓库（不要复制代码副本，确保后续 `git pull` 即刻生效）：
+   - **Windows (PowerShell / CMD 管理员或开发者模式)**：
+     `New-Item -ItemType SymbolicLink -Path "$env:USERPROFILE\.agents\skills\wechat-mp-publisher" -Target "<仓库绝对路径>"`
+   - **macOS / Linux**：
+     `ln -s /path/to/wechat-mp-publisher-skill ~/.agents/skills/wechat-mp-publisher`
+3. 之后只需对 Agent 说：“更新公众号草稿”、“把某某文章更新到公众号”或“拉取最新推文存草稿”，Agent 即可按照 `SKILL.md` 规范自动完成检索、提炼短标题、推送与重开复验。
 
-## 来源和私有数据
+---
 
-默认 Muse 来源为 `F:\同步文件夹\公众号\每日推文`，本地独立来源为 `Z:\自媒体\公众号\每日推文`。发布只读访问两处来源。状态、缓存、封面、登录 Profile、名片模板和报告保存在独立私有目录。
+## 项目目录架构
 
-历史坏 JSON、缺图、未稳定文件、旧基线缺映射均明确停止或报告待核对，保留已有草稿 ID。不要清库或删除基线来强行重建文章。
-
-登录态有有效期；过期后报告需要续期。平台编辑器改变时仍需重新验证。代码不会代替用户发表、群发文章。
-
-## 代码与说明
-
-| 文件 | 用途 |
+| 文件 / 目录 | 说明 |
 |---|---|
-| `SKILL.md` | Agent 执行入口和验收规则 |
-| `scripts/batch-fast-wechat.ts` | 单篇与批量编辑、保存、独立复验 |
-| `scripts/draft-state.ts` | 双源扫描、指纹、历史合并、进程锁 |
-| `scripts/article-content.ts` | Markdown 渲染、原生粘贴、正文图片 |
-| `scripts/editor-input.ts` | 任务标签中的原生 HTML 复制粘贴 |
-| `scripts/editor-mode.ts` | 普通长文类型及可编辑性检查 |
-| `scripts/editor-features.ts` | H1、封面、原生名片及巡检 |
-| `scripts/set-titles.ts` | 私有短标题映射校验与原子合并工具 (`bun run titles`) |
-| [日常操作](references/operations.md) | 环境、预检、标题映射、封面、单篇和批量执行、恢复 |
-| [故障排查](references/troubleshooting.md) | 常见失败原因、自动保存、防重和处理边界 |
-| [独立测试](references/testing.md) | 子 agent 复现步骤、离线与现场验收矩阵 |
-| [本轮验证状态](references/validation-status.md) | 实际初审、修复、离线结果及独立现场验收状态 |
-| `references/editor-reliability.md` | 已实测故障与定位规则 |
-| `references/configuration.md` | 依赖、路径、环境变量 |
-| `references/cron-scheduling-prompt.md` | 每日 08:00 / 20:00 调度约定 |
+| [`SKILL.md`](SKILL.md) | AI Agent 技能定义、执行顺序与验收标准 |
+| [`bin/launch-publisher.mjs`](bin/launch-publisher.mjs) | 统一启动器（自动加载 `.env`、`--check` 映射、正式写入前执行 TypeScript 检查） |
+| [`scripts/batch-fast-wechat.ts`](scripts/batch-fast-wechat.ts) | 单窗口多标签批处理引擎、原生复制粘贴调度、保存与独立重开复验 |
+| [`scripts/draft-state.ts`](scripts/draft-state.ts) | 双源扫描、SHA-256 指纹、原子状态合并、进程互斥锁与候选 ID 防重 |
+| [`scripts/article-content.ts`](scripts/article-content.ts) | Markdown 渲染、原生选区重试、逐图直传与 32×32 像素顺位校验 |
+| [`scripts/editor-input.ts`](scripts/editor-input.ts) | 任务自有空白标签原生 HTML 复制粘贴与新正文替代轮询 |
+| [`scripts/editor-mode.ts`](scripts/editor-mode.ts) | 普通长文可见性/可编辑性守卫，拦截图片轮播消息隐藏镜像 |
+| [`scripts/editor-features.ts`](scripts/editor-features.ts) | 完整原题 H1、2.35:1 封面裁剪选择、原生 `mp-common-profile` 名片与巡检 |
+| [`scripts/set-titles.ts`](scripts/set-titles.ts) | 15 字短标题校验与安全合并工具（`bun run titles`） |
+| [`scripts/wechat-article.ts`](scripts/wechat-article.ts) | 单篇独立发布命令行工具（`bun run article`） |
+| [`.env.example`](.env.example) | 环境变量配置模板（复制为 `.env` 即可快速定制你的账号与目录） |
+| [`references/`](references/operations.md) | 详细操作手册、故障排查、配置说明、独立测试矩阵与验证记录 |
+| [`NOTICE`](NOTICE) / [`LICENSE`](LICENSE) | MIT 开源协议及上游归属声明 |
 
-真实文章、状态映射、凭据、截图、报告和现场诊断脚本均不提交公开仓库。忽略规则不能代替提交前内容审核。
+---
 
-## 归属
+## 安全边界与注意事项
 
-本项目采用 [MIT License](LICENSE)。CDP 与 Markdown 基础源自 [baoyu-skills](https://github.com/JimLiu/baoyu-skills) 和 [doocs/md](https://github.com/doocs/md)，详见 [NOTICE](NOTICE)。
+- **会话时效**：公众号网页端登录 Cookies 存在有效期，平台风控或长期不用后会过期，**不存在“永久免登”**；失效时会提示人工在专用浏览器重新扫码。
+- **不代点群发**：代码只触发 `#js_submit` 保存草稿按钮，绝不触碰发表或群发。
+- **隐私隔离**：`.gitignore` 已默认忽略 `.env`、`data/`、`cache/`、`chrome-profile/`、`wechat-draft-history.json`、`tests/reports/`、`tests/private/` 等全部私有路径；提交前仍建议审计暂存区。
+
+---
+
+## 开源许可与致谢
+
+- 本项目采用 **[MIT License](LICENSE)** 开源，欢迎遵循 [CONTRIBUTING.md](CONTRIBUTING.md) 参与共建。
+- CDP 通信与 Markdown 转换基础源自 [baoyu-skills](https://github.com/JimLiu/baoyu-skills)（Jim Liu，MIT License）与 [doocs/md](https://github.com/doocs/md)（Doocs，WTFPL License），详见 [NOTICE](NOTICE)。

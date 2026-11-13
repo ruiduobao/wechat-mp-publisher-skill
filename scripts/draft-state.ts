@@ -357,7 +357,7 @@ export function loadHistoryDatabase(pathsOverride?: StatePathsConfig): Record<st
       fullPath: item.fullPath || '',
       title: item.title || '',
       outerTitle: item.outerTitle || item.title || '',
-      author: item.author || '锐多宝',
+      author: item.author || process.env.WECHAT_AUTHOR || '锐多宝',
       appmsgid: item.appmsgid || null,
       candidateAppmsgids: Array.isArray(item.candidateAppmsgids) ? item.candidateAppmsgids : [],
       status: item.status || (item.appmsgid ? 'active' : 'needs-reconcile'),
@@ -625,7 +625,7 @@ export function computeStateCatalog(options: { dryRun?: boolean; targetId?: stri
       title: originalTitle,
       // 旧 outerTitle 优先保留；若无则保留完整 title 或由配置指定，不盲截
       outerTitle: existing?.outerTitle || originalTitle,
-      author: '锐多宝',
+      author: process.env.WECHAT_AUTHOR || '锐多宝',
       appmsgid,
       candidateAppmsgids: existing?.candidateAppmsgids || [],
       status,

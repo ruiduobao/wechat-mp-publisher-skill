@@ -19,19 +19,37 @@
   },
   "keywords": [
     "wechat",
+    "wechat-official-account",
+    "wechat-mp",
     "weixin",
     "mp",
     "official-account",
     "markdown",
     "publisher",
+    "draft-publisher",
     "cdp",
+    "chrome-devtools-protocol",
+    "browser-automation",
     "chrome",
     "edge",
     "automation",
     "agent-skill",
     "zcode",
-    "claude-code"
+    "claude-code",
+    "typescript",
+    "bun"
   ],
+  "homepage": "https://github.com/ruiduobao/wechat-mp-publisher-skill#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruiduobao/wechat-mp-publisher-skill.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ruiduobao/wechat-mp-publisher-skill/issues"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "author": "ruiduobao",
   "license": "MIT",
   "dependencies": {

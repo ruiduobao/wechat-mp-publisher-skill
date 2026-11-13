@@ -37,8 +37,8 @@ import {
   sanitizeUrlForLog,
   verifyImagesIntegrity,
   getOrCreateLegacyBaseline,
+  getStatePaths,
   CURRENT_FEATURE_VERSION,
-  STATE_CACHE_DIR,
   type DraftStateRecord,
 } from './draft-state.ts';
 import {
@@ -762,6 +762,10 @@ export async function processSingleArticle(
     const finalOuterTitle = resolveOuterTitle(item, initialFeatures.title, options);
     console.log(`[wechat-batch] 外层标题栏确定: "${finalOuterTitle}"`);
 
+    const targetAuthor = (process.env.WECHAT_AUTHOR || RUIDUOBAO_TARGET_NICKNAME).trim();
+    const skipProfileCard = process.env.WECHAT_SKIP_PROFILE_CARD === '1' || process.env.WECHAT_SKIP_PROFILE_CARD === 'true';
+    const statePaths = getStatePaths();
+
     await evaluatePage(editSession, `
       (function() {
         const tEl = document.querySelector('#title');
@@ -774,7 +778,7 @@ export async function processSingleArticle(
         const aEl = document.querySelector('#author');
         if (aEl) {
           aEl.focus();
-          aEl.value = '锐多宝';
+          aEl.value = ${JSON.stringify(targetAuthor)};
           aEl.dispatchEvent(new Event('input', { bubbles: true }));
           aEl.dispatchEvent(new Event('change', { bubbles: true }));
         }
@@ -787,7 +791,7 @@ export async function processSingleArticle(
         recordVerifiedDraft(item.id, item.appmsgid, { verified: false, evidenceNotes: 'Full content update started; remains pending until independent reopen passes' }, { mode: 'full-content', outerTitle: finalOuterTitle });
       }
       console.log(`[wechat-batch] 调用 E 模块: 渲染正文与上传本地图片...`);
-      renderResult = await renderArticleContent(item.fullPath, { cacheRoot: STATE_CACHE_DIR });
+      renderResult = await renderArticleContent(item.fullPath, { cacheRoot: statePaths.stateCacheDir });
       const applyRes = await applyArticleContent(editSession, renderResult, { expectedTitle: item.title });
       if (!applyRes.ok) {
         throw new Error(`E 模块正文或图片上传未完全就绪: ${applyRes.error || applyRes.details}`);
@@ -814,37 +818,45 @@ export async function processSingleArticle(
     }
     console.log(`[wechat-batch] ✅ 文章封面预览图设置成功`);
 
-    // 7. 调用 A 模块接口：插入官方原生【锐多宝】名片 (私有模板支持，防止搜索超时)
-    console.log(`[wechat-batch] 调用 A 模块: 插入原生账号名片...`);
-    const privateCardTemplatePath = 'C:\\Users\\Administrator\\.agents\\skills\\wechat-md-pipeline\\data\\native-card-template.html';
-    let nativeCardTemplate: string | undefined;
-    try {
-      if (fs.existsSync(privateCardTemplatePath)) {
-        const raw = fs.readFileSync(privateCardTemplatePath, 'utf-8').trim();
-        if (raw.includes('mp-common-profile') && raw.includes(RUIDUOBAO_TARGET_DATA_ID)) {
-          nativeCardTemplate = raw;
+    // 7. 调用 A 模块接口：插入官方原生账号名片 (私有模板支持，防止搜索超时；可通过 WECHAT_SKIP_PROFILE_CARD=1 跳过)
+    if (!skipProfileCard) {
+      console.log(`[wechat-batch] 调用 A 模块: 插入原生账号名片...`);
+      const privateCardTemplatePath = process.env.WECHAT_PROFILE_TEMPLATE_FILE || 'C:\\Users\\Administrator\\.agents\\skills\\wechat-md-pipeline\\data\\native-card-template.html';
+      let nativeCardTemplate: string | undefined;
+      try {
+        if (fs.existsSync(privateCardTemplatePath)) {
+          const raw = fs.readFileSync(privateCardTemplatePath, 'utf-8').trim();
+          if (raw.includes('mp-common-profile') && raw.includes(RUIDUOBAO_TARGET_DATA_ID)) {
+            nativeCardTemplate = raw;
+          }
         }
-      }
-    } catch {}
+      } catch {}
 
-    const cardResult = await insertNativeRuiduobaoCard(editSession, {
-      timeoutMs: 25_000,
-      nativeCardTemplateHtml: nativeCardTemplate,
-      nativeCardHtml: nativeCardTemplate,
-      preferNativeTemplate: !!nativeCardTemplate,
-    });
-    if (!cardResult.ok) {
-      throw new Error(`A模块插入原生名片失败: ${cardResult.details || cardResult.error}`);
+      const cardResult = await insertNativeRuiduobaoCard(editSession, {
+        timeoutMs: 25_000,
+        nativeCardTemplateHtml: nativeCardTemplate,
+        nativeCardHtml: nativeCardTemplate,
+        preferNativeTemplate: !!nativeCardTemplate,
+      });
+      if (!cardResult.ok) {
+        throw new Error(`A模块插入原生名片失败: ${cardResult.details || cardResult.error}`);
+      }
+      console.log(`[wechat-batch] ✅ 原生【${RUIDUOBAO_TARGET_NICKNAME}】名片插入成功 (${cardResult.details})`);
+    } else {
+      console.log(`[wechat-batch] ℹ️ 已配置 WECHAT_SKIP_PROFILE_CARD=1，跳过名片插入。`);
     }
-    console.log(`[wechat-batch] ✅ 原生【锐多宝】名片插入成功 (${cardResult.details})`);
 
     // 8. 保存前全要素快速 inspect，防止未关闭 modal 误点保存
     const preSaveInspect = await inspectEditorFeatures(editSession);
+    const preCardOk = skipProfileCard || (
+      preSaveInspect.profileCard.isRealMpCommonProfile &&
+      preSaveInspect.profileCard.isAtEnd &&
+      preSaveInspect.profileCard.dataId === RUIDUOBAO_TARGET_DATA_ID &&
+      preSaveInspect.profileCard.dataNickname === RUIDUOBAO_TARGET_NICKNAME
+    );
     if (!preSaveInspect.titleH1.exists || preSaveInspect.titleH1.count !== 1 ||
         !preSaveInspect.titleH1.isFirstElement || preSaveInspect.titleH1.text?.trim() !== item.title.trim() ||
-        !preSaveInspect.cover.hasCover || !preSaveInspect.profileCard.isRealMpCommonProfile ||
-        !preSaveInspect.profileCard.isAtEnd || preSaveInspect.profileCard.dataId !== RUIDUOBAO_TARGET_DATA_ID ||
-        preSaveInspect.profileCard.dataNickname !== RUIDUOBAO_TARGET_NICKNAME) {
+        !preSaveInspect.cover.hasCover || !preCardOk) {
       throw new Error(`保存前预检失败: H1=${preSaveInspect.titleH1.exists}, 封面=${preSaveInspect.cover.hasCover}, 名片=${preSaveInspect.profileCard.exists}`);
     }
     const contentSnapshotExpression = `(() => {
@@ -923,8 +935,10 @@ export async function processSingleArticle(
           const t = document.querySelector('#title');
           const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
           if (!t || !editor || !t.value?.trim()) return false;
-          const card = editor.querySelector('mp-common-profile');
-          if (!card) return false;
+          if (!${JSON.stringify(skipProfileCard)}) {
+            const card = editor.querySelector('mp-common-profile');
+            if (!card) return false;
+          }
           const area = document.querySelector('#js_cover_area');
           const coverEl = area?.querySelector('.first_appmsg_cover') || area?.querySelector('[style*="background-image"]');
           const bg = coverEl ? (window.getComputedStyle(coverEl).backgroundImage || coverEl.style.backgroundImage || '') : '';
@@ -975,17 +989,19 @@ export async function processSingleArticle(
         inspection.titleH1.isFirstElement &&
         inspection.titleH1.text?.trim() === item.title.trim();
 
-      const cardStrict = inspection.profileCard.exists &&
+      const cardStrict = skipProfileCard || (
+        inspection.profileCard.exists &&
         inspection.profileCard.isRealMpCommonProfile &&
         inspection.profileCard.isAtEnd &&
         inspection.profileCard.dataNickname === RUIDUOBAO_TARGET_NICKNAME &&
-        inspection.profileCard.dataId === RUIDUOBAO_TARGET_DATA_ID;
+        inspection.profileCard.dataId === RUIDUOBAO_TARGET_DATA_ID
+      );
 
       const coverStrict = inspection.cover.hasCover &&
         !!inspection.cover.coverUrl &&
         inspection.cover.coverUrl.trim() !== '';
 
-      const authorStrict = reloadedFeatures.author === '锐多宝';
+      const authorStrict = reloadedFeatures.author === targetAuthor;
       const titleStrict = reloadedFeatures.title === finalOuterTitle;
 
       const afterSaveContent = await evaluatePage<{ text: string; images: string[] }>(reopenSession, contentSnapshotExpression);
@@ -997,8 +1013,8 @@ export async function processSingleArticle(
       });
       const contentPreserved = textPreserved && imgVerify.matched;
       if (!contentPreserved) {
-        fs.mkdirSync(STATE_CACHE_DIR, { recursive: true });
-        fs.writeFileSync(path.join(STATE_CACHE_DIR, 'last-content-mismatch.json'), JSON.stringify({
+        fs.mkdirSync(statePaths.stateCacheDir, { recursive: true });
+        fs.writeFileSync(path.join(statePaths.stateCacheDir, 'last-content-mismatch.json'), JSON.stringify({
           id: item.id,
           textPreserved,
           imageMatch: imgVerify,
