@@ -22,6 +22,14 @@ node bin/launch-publisher.mjs --check
 此仓库是已配置账号的运行代码，首次克隆仍需核对来源、私有状态路径、专用浏览器及名片配置。基线不存在时，当前已扫描文章会被视为待核对历史，避免将已有文章重新建稿。不要为绕过这一保护而清空真实基线。完整操作步骤见[日常操作手册](references/operations.md)。
 
 ```bash
+# 只读预检、关键词查找或查看最新推文
+node bin/launch-publisher.mjs --check
+node bin/launch-publisher.mjs --check --search "GEM-15"
+node bin/launch-publisher.mjs --check --latest
+
+# 安全合并 ≤15 字语义短标题到私有 titles-override.json
+bun run titles "muse:20261113_1105:01=GEM-15全球15米高程模型"
+
 # 单篇按已识别的文章身份处理，已有 appmsgid 时原地更新
 node bin/launch-publisher.mjs --id muse:20261111_2020:01 --title-override "语义短标题"
 
@@ -40,13 +48,13 @@ node bin/launch-publisher.mjs --help
 
 ## 实际编辑与验收
 
-- 复用专用 Profile 和登录主页，按 Profile 动态查找调试端口；每篇仅管理本任务的编辑、复制和复验标签。
+- 复用专用 Profile 和登录主页，按 Profile 动态查找调试端口；未启动时自动以脱管常驻进程拉起专用浏览器，绝不关闭用户其它 Edge；每篇仅管理本任务的编辑、复制和复验标签。
 - 写入前确认准确的正文 `.rich_media_content .ProseMirror` 可见且可编辑。图片轮播消息会留有隐藏的长文编辑器，不能将它当成空稿。
-- 完整正文先在任务自有空白标签中准备，再用原生复制和粘贴键交给微信编辑器处理。检查真实 HTML 粘贴事件、正文文本和图片占位符，避免继承旧首段 H1 格式。
-- 本地正文图逐个上传，在准确位置核验新图为已加载的微信 CDN 素材。定位文字通过编辑器输入删除；保存前拒绝残留标记。
+- 完整正文先在任务自有空白标签中准备，再用原生复制和粘贴键交给微信编辑器处理。检查真实 HTML 粘贴事件，轮询等待规范化新正文真正替代旧正文，避免读取旧内容快照误报丢占位符。
+- 本地正文图逐个上传，通过带选区抖动重试的原生选区插入唯一标记并检验全篇差值，在准确位置核验新图为已加载的微信 CDN 素材。定位文字通过原生退格删除；保存前拒绝残留标记。
 - 封面可以复用有效封面、选择正文图或使用独立文件。无正文图合法，封面不插进正文充数。
 - 名片要求真正的 `mp-common-profile`，账号身份正确，位于正文末尾。
-- 保存取得 ID 后立即保全为 `saved-unverified`，随后独立新标签重开同一 ID，检查正文文字、图片顺序及加载、唯一首位 H1、作者、外题、封面和原生名片。微信把同一素材的 `/0` 改为 `/640` 时按素材身份比较。
+- 保存取得 ID 后立即保全为 `saved-unverified`，随后独立新标签条件轮询等待同一 ID 加载完成，检查正文文字、图片数量与加载、唯一首位 H1、作者、外题、封面和原生名片。除了核对合法 qpic `/0` 与 `/640` 尺寸归一化外，若微信服务端保存时因素材去重或重签名改变 URL 路径，采用 32×32 RGBA 内存像素交叉 MAE 验证顺序与内容一致性。
 
 按钮、toast、编辑态 DOM 和保存回包均不能单独算成功。完整正文复验通过才记录已应用指纹；元数据修复不会把源正文标为已应用。未完成全量更新会持久化待完成标记，重跑继续原稿全量更新；自动保存身份尚未确认时先保全候选 ID，阻止再次新建。
 
@@ -69,6 +77,7 @@ node bin/launch-publisher.mjs --help
 | `scripts/editor-input.ts` | 任务标签中的原生 HTML 复制粘贴 |
 | `scripts/editor-mode.ts` | 普通长文类型及可编辑性检查 |
 | `scripts/editor-features.ts` | H1、封面、原生名片及巡检 |
+| `scripts/set-titles.ts` | 私有短标题映射校验与原子合并工具 (`bun run titles`) |
 | [日常操作](references/operations.md) | 环境、预检、标题映射、封面、单篇和批量执行、恢复 |
 | [故障排查](references/troubleshooting.md) | 常见失败原因、自动保存、防重和处理边界 |
 | [独立测试](references/testing.md) | 子 agent 复现步骤、离线与现场验收矩阵 |

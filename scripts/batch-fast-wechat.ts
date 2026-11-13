@@ -16,13 +16,15 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import {
   CdpConnection,
   findChromeExecutable,
   findExistingChromeDebugPort,
   getDefaultProfileDir,
-  launchChrome,
+  getFreePort,
   sleep,
+  waitForChromeDebugPort,
   type ChromeSession,
 } from './cdp.ts';
 import {
@@ -54,6 +56,7 @@ import {
   renderArticleContent,
   applyArticleContent,
   wechatImageIdentity,
+  verifyReopenedImagesMatch,
   type RenderArticleResult,
 } from './article-content.ts';
 import { assertArticleEditor } from './editor-mode.ts';
@@ -69,6 +72,8 @@ export interface BatchCliOptions {
   repair: boolean;
   refreshContent: boolean;
   id?: string;
+  search?: string;
+  latest?: number;
   limit?: number;
   batch?: string;
   days?: number;
@@ -90,11 +95,13 @@ export function printHelpAndExit(): never {
   --repair                  安全原地精修模式 (优先在原草稿上修补 H1/作者/封面/名片，保留正文CDN图)
   --refresh-content         强制在原草稿上使用 E 模块重建正文与图片 (必须与 --id 配合)
   --id <articleId>          指定单篇推文处理 (例如 local:20261106_1800:02)
+  --search <keyword>        按关键词检索推文 (匹配 ID/文件名/标题/正文; 别名 --find)
+  --latest [N]              按批次与文件时间选择最新 N 篇文章 (默认 1 篇)
   --limit <N>               限制本次处理的最大篇数 (必须为正整数)
   --batch <batchName>       按批次目录过滤 (例如 20261106_1800)
   --days <N>                仅处理最近 N 天内的批次推文 (必须为正整数)
   --source <all|local|muse> 来源过滤 (默认 all)
-  --title-override <title>  覆盖写入外层标题栏 (仅限单篇模式)
+  --title-override <title>  覆盖写入外层标题栏 (仅限单篇模式，须配合 --id 或 --latest 1)
   --titles <path.json>      加载外部短标题映射文件 (格式: { [articleId]: shortTitle })
   -h, --help                显示本帮助信息并退出 (退出码 0)
 `.trim());
@@ -107,6 +114,8 @@ export function parseBatchArgs(): BatchCliOptions {
   let repair = false;
   let refreshContent = false;
   let id: string | undefined;
+  let search: string | undefined;
+  let latest: number | undefined;
   let limit: number | undefined;
   let batch: string | undefined;
   let days: number | undefined;
@@ -131,6 +140,23 @@ export function parseBatchArgs(): BatchCliOptions {
         process.exit(2);
       }
       id = args[++i];
+    } else if (a === '--search' || a === '--find') {
+      if (i + 1 >= args.length || args[i + 1]!.startsWith('--')) {
+        console.error(`❌ 参数错误: ${a} 缺少关键词参数`);
+        process.exit(2);
+      }
+      search = args[++i];
+    } else if (a === '--latest') {
+      if (i + 1 < args.length && !args[i + 1]!.startsWith('--')) {
+        const val = parseInt(args[++i]!, 10);
+        if (isNaN(val) || val <= 0) {
+          console.error(`❌ 参数错误: --latest 必须为正整数，收到: ${args[i]}`);
+          process.exit(2);
+        }
+        latest = val;
+      } else {
+        latest = 1;
+      }
     } else if (a === '--limit') {
       if (i + 1 >= args.length || args[i + 1]!.startsWith('--')) {
         console.error('❌ 参数错误: --limit 缺少参数值');
@@ -204,7 +230,13 @@ export function parseBatchArgs(): BatchCliOptions {
     process.exit(2);
   }
 
-  return { dryRun, repair, refreshContent, id, limit, batch, days, source, titleOverride, titlesFile, titleMap };
+  // 严格门禁：--title-override 仅限单篇模式，防止将同一短标题误应用到多篇
+  if (titleOverride && !id && latest !== 1 && !search) {
+    console.error('❌ 参数错误: --title-override 仅限单篇模式 (须与 --id 或 --latest 1 配合；批量请使用 --titles <json>)');
+    process.exit(2);
+  }
+
+  return { dryRun, repair, refreshContent, id, search, latest, limit, batch, days, source, titleOverride, titlesFile, titleMap };
 }
 
 // -----------------------------------------------------------------------------
@@ -493,33 +525,59 @@ export async function connectOrCreateHomeSession(): Promise<ConnectedHome> {
       throw new Error(`[wechat-batch] 发现调试端口 ${port} 但无法建立 WebSocket 连接: ${connErr?.message || connErr}`);
     }
   } else {
-    throw new Error('[wechat-batch] 未找到带调试端口(--remote-debugging-port)的运行中浏览器实例，请在已有 Profile 浏览器以调试端口启动后重试 (需要 attention)');
+    const chromePath = findChromeExecutable();
+    if (!chromePath) {
+      throw new Error('[wechat-batch] 未找到可用的 Edge/Chrome 可执行文件，请设置 WECHAT_BROWSER_CHROME_PATH (需要 attention)');
+    }
+    const freePort = await getFreePort();
+    console.log(`[wechat-batch] 专用 Profile 浏览器未运行，正在独立拉起常驻实例 (port: ${freePort})...`);
+    const child = spawn(
+      chromePath,
+      [
+        `--remote-debugging-port=${freePort}`,
+        `--user-data-dir=${profileDir}`,
+        '--disable-blink-features=AutomationControlled',
+        '--start-maximized',
+        '--no-first-run',
+        '--no-default-browser-check',
+        `${WECHAT_URL}cgi-bin/home?t=home/index`,
+      ],
+      { detached: true, stdio: 'ignore', windowsHide: false }
+    );
+    child.unref();
+
+    const wsUrl = await waitForChromeDebugPort(freePort, 25_000, { includeLastError: true });
+    cdp = await CdpConnection.connect(wsUrl, 12_000);
+    console.log(`[wechat-batch] ✅ 已独立拉起并连接专用浏览器调试端口: ${freePort}`);
   }
 
-  await sleep(1500);
+  await sleep(400);
   const targets = await cdp.send<{ targetInfos: Array<{ targetId: string; url: string; type: string }> }>('Target.getTargets');
 
   let homeTarget = targets.targetInfos.find(t => t.type === 'page' && t.url.includes('/cgi-bin/home'));
 
   if (!homeTarget) {
-    const created = await cdp.send<{ targetId: string }>('Target.createTarget', { url: WECHAT_URL });
+    const created = await cdp.send<{ targetId: string }>('Target.createTarget', { url: `${WECHAT_URL}cgi-bin/home?t=home/index` });
     homeTarget = { targetId: created.targetId, url: WECHAT_URL, type: 'page' };
-    await sleep(3500);
+    await sleep(1500);
   }
 
   const { sessionId: homeSid } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: homeTarget.targetId, flatten: true });
   const homeSession: EditorSession = { cdp, sessionId: homeSid, targetId: homeTarget.targetId };
 
+  await cdp.send('Page.enable', {}, { sessionId: homeSid }).catch(() => {});
+  await cdp.send('Runtime.enable', {}, { sessionId: homeSid }).catch(() => {});
+
   const currentUrl = await evaluatePage<string>(homeSession, 'window.location.href');
   if (!currentUrl.includes('/cgi-bin/home')) {
     console.log(`[wechat-batch] 导航至公众号后台首页...`);
     await evaluatePage(homeSession, `window.location.href = '${WECHAT_URL}cgi-bin/home?t=home/index'`);
-    await sleep(3500);
+    await sleep(1200);
   }
 
   const isMenuReady = await waitForSelector(homeSession, '.new-creation__menu', 25_000);
   if (!isMenuReady) {
-    throw new Error('[wechat-batch] 公众号后台登录态已失效或首页加载超时，请在浏览器中保持登录态后重试 (attention)');
+    throw new Error('[wechat-batch] 公众号后台登录态已失效或首页加载超时，请在专用浏览器扫码续期后重试 (needs-attention)');
   }
 
   const homeFinalUrl = await evaluatePage<string>(homeSession, 'window.location.href');
@@ -655,7 +713,7 @@ export async function processSingleArticle(
     if (!titleReady) throw new Error('编辑器标题输入框 (#title) 加载超时');
     await waitForSelector(editSession, BODY_EDITOR_SELECTOR, 20_000);
     await assertArticleEditor(editSession);
-    await sleep(2000);
+    await sleep(600);
     await installSaveNetworkHook(editSession);
 
     // 2. 捕获进入时的原正文与图片 URL 集合快照
@@ -834,7 +892,7 @@ export async function processSingleArticle(
       try { await cdp.send('Target.closeTarget', { targetId: editorTargetId }); } catch {}
       editorTargetId = null;
     }
-    await sleep(2500); // 确保微信服务器落库及原标签页彻底关闭
+    await sleep(1000); // 缓冲原标签页关闭
 
     // 使用 CDP Target.createTarget 新建一个绝对干净的独立重开标签页
     const createdReopen = await cdp.send<{ targetId: string }>('Target.createTarget', { url: inspectUrl });
@@ -856,8 +914,29 @@ export async function processSingleArticle(
       // 严格等待全新 document 从服务器拉取并完成基础 DOM 加载
       await waitForSelector(reopenSession, '#title', 30_000);
       await waitForSelector(reopenSession, BODY_EDITOR_SELECTOR, 25_000);
-      // 等待微信异步自定义元素 mp-common-profile 与封面背景图完全渲染完成
-      await sleep(3000);
+
+      // 条件轮询等待微信异步自定义元素 mp-common-profile、封面背景图和正文图片解码完成
+      const expectedImageCount = renderResult ? renderResult.images.length + renderResult.existingCdnImages.length : imgReport.images.length;
+      const mediaWaitStarted = Date.now();
+      while (Date.now() - mediaWaitStarted < 35_000) {
+        const ready = await evaluatePage<boolean>(reopenSession, `(() => {
+          const t = document.querySelector('#title');
+          const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+          if (!t || !editor || !t.value?.trim()) return false;
+          const card = editor.querySelector('mp-common-profile');
+          if (!card) return false;
+          const area = document.querySelector('#js_cover_area');
+          const coverEl = area?.querySelector('.first_appmsg_cover') || area?.querySelector('[style*="background-image"]');
+          const bg = coverEl ? (window.getComputedStyle(coverEl).backgroundImage || coverEl.style.backgroundImage || '') : '';
+          if (!bg.includes('url(') || bg.includes('none')) return false;
+          const imgs = Array.from(editor.querySelectorAll('img:not(.ProseMirror-separator)'));
+          if (!${JSON.stringify(isRepairMode)} && imgs.length !== ${expectedImageCount}) return false;
+          return imgs.every(img => img.complete && img.naturalWidth > 0);
+        })()`).catch(() => false);
+        if (ready) break;
+        await sleep(300);
+      }
+      await sleep(200);
 
       // 严格使用 new URL().searchParams.get('appmsgid') 校验重开草稿 ID
       const reloadedHref = await evaluatePage<string>(reopenSession, 'window.location.href');
@@ -869,13 +948,6 @@ export async function processSingleArticle(
 
       const inspection = await inspectEditorFeatures(reopenSession);
 
-      // 服务器正文初始化和图片解码均为异步；只读等待实际图片加载，不能用固定三秒代替。
-      const mediaWaitStarted = Date.now();
-      while (Date.now() - mediaWaitStarted < 40_000) {
-        const ready = await evaluatePage<boolean>(reopenSession, `Array.from(document.querySelectorAll(${JSON.stringify(`${BODY_EDITOR_SELECTOR} img:not(.ProseMirror-separator)`)})).every(img => img.complete && img.naturalWidth > 0)`);
-        if (ready) break;
-        await sleep(500);
-      }
       // 严格获取重开后特征：作者、外层标题、图片URL集合、所有图片 complete/naturalWidth 加载状态
       const reloadedFeatures = await evaluatePage<{
         author: string;
@@ -916,22 +988,32 @@ export async function processSingleArticle(
       const authorStrict = reloadedFeatures.author === '锐多宝';
       const titleStrict = reloadedFeatures.title === finalOuterTitle;
 
-      const expectedImageCount = renderResult ? renderResult.images.length + renderResult.existingCdnImages.length : imgReport.images.length;
       const afterSaveContent = await evaluatePage<{ text: string; images: string[] }>(reopenSession, contentSnapshotExpression);
-      const contentPreserved = beforeSaveContent.text === afterSaveContent.text &&
-        JSON.stringify(beforeSaveContent.images.map(wechatImageIdentity)) === JSON.stringify(afterSaveContent.images.map(wechatImageIdentity));
+      const textPreserved = beforeSaveContent.text === afterSaveContent.text;
+      const imgVerify = await verifyReopenedImagesMatch(beforeSaveContent.images, afterSaveContent.images, {
+        localImagePaths: !isRepairMode && renderResult && renderResult.existingCdnImages.length === 0
+          ? renderResult.images.map(x => x.localPath)
+          : undefined,
+      });
+      const contentPreserved = textPreserved && imgVerify.matched;
       if (!contentPreserved) {
         fs.mkdirSync(STATE_CACHE_DIR, { recursive: true });
-        fs.writeFileSync(path.join(STATE_CACHE_DIR, 'last-content-mismatch.json'), JSON.stringify({ id: item.id, before: beforeSaveContent, after: afterSaveContent }, null, 2));
+        fs.writeFileSync(path.join(STATE_CACHE_DIR, 'last-content-mismatch.json'), JSON.stringify({
+          id: item.id,
+          textPreserved,
+          imageMatch: imgVerify,
+          before: beforeSaveContent,
+          after: afterSaveContent,
+        }, null, 2));
       }
       const imagesNotLost = isRepairMode
-        ? Array.from(initialImgSet).every(u => reloadedFeatures.imageUrls.map(wechatImageIdentity).includes(wechatImageIdentity(u))) && reloadedFeatures.allImagesLoaded
-        : (reloadedFeatures.imageUrls.length === expectedImageCount) && reloadedFeatures.allImagesLoaded;
+        ? imgVerify.matched && reloadedFeatures.allImagesLoaded
+        : (reloadedFeatures.imageUrls.length === expectedImageCount) && reloadedFeatures.allImagesLoaded && imgVerify.matched;
 
       isAllVerified = h1Strict && cardStrict && coverStrict && authorStrict && titleStrict && imagesNotLost && contentPreserved;
 
       console.log(`[wechat-batch] 严格复验报告 (独立重开标签页):
-  - 正文文字和图片顺序: ${contentPreserved}
+  - 正文文字和图片顺序: ${contentPreserved} (${imgVerify.method}${imgVerify.maxMae !== undefined ? `, maxMAE=${imgVerify.maxMae.toFixed(4)}` : ''}${imgVerify.reason ? `, reason=${imgVerify.reason}` : ''})
   - H1 匹配且首位唯一: ${h1Strict}
   - 名片组件且居尾端:   ${cardStrict}
   - 封面非空实际 URL:  ${coverStrict}
@@ -1012,6 +1094,8 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
   console.log(`[wechat-batch] 微信公众号草稿箱在原草稿更新与发布引擎 (Safe Spine + E 接线)`);
   console.log(`  模式: ${options.dryRun ? 'DRY-RUN (纯读演练)' : options.repair ? 'REPAIR (原稿精修)' : 'FULL-PIPELINE'}`);
   if (options.id) console.log(`  单篇过滤: ${options.id}`);
+  if (options.search) console.log(`  关键词检索: "${options.search}"`);
+  if (options.latest) console.log(`  最新推文选取: 最近 ${options.latest} 篇`);
   if (options.limit) console.log(`  处理上限: ${options.limit} 篇`);
   if (options.days) console.log(`  天数范围: 最近 ${options.days} 天`);
   console.log(`================================================================`);
@@ -1037,18 +1121,84 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
 
     console.log(`[wechat-batch] 状态库统计: 总计 ${catalog.totalScanned} 篇 | 活跃已确立: ${catalog.activeCount} 篇 | 待对齐: ${catalog.needsReconcileCount} 篇 | 缺图拦截: ${catalog.missingImageCount} 篇 | 未入库新篇: ${catalog.untrackedCount} 篇`);
 
-    let candidates = catalog.articles;
     if (options.id) {
-      candidates = candidates.filter(a => a.id === options.id);
-    }
-    if (options.batch) {
-      candidates = candidates.filter(a => a.batch === options.batch);
-    }
-    if (options.source && options.source !== 'all') {
-      candidates = candidates.filter(a => a.source === options.source);
+      const targetExists = catalog.articles.some(a => a.id === options.id);
+      if (!targetExists) {
+        console.error(`❌ [wechat-batch] 未找到指定文章 ID: ${options.id} (请运行 --check --search "<关键词>" 确认精确 articleId)`);
+        return 1;
+      }
     }
 
-    candidates = candidates.filter(item => {
+    let scopedArticles = catalog.articles;
+    if (options.id) {
+      scopedArticles = scopedArticles.filter(a => a.id === options.id);
+    }
+    if (options.batch) {
+      scopedArticles = scopedArticles.filter(a => a.batch === options.batch);
+    }
+    if (options.source && options.source !== 'all') {
+      scopedArticles = scopedArticles.filter(a => a.source === options.source);
+    }
+    if (options.days && options.days > 0) {
+      const d = new Date();
+      d.setDate(d.getDate() - options.days);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const cutoff = `${yyyy}${mm}${dd}`;
+      scopedArticles = scopedArticles.filter(a => a.batch.slice(0, 8) >= cutoff);
+    }
+
+    if (options.search) {
+      const kw = options.search.trim().toLowerCase();
+      scopedArticles = scopedArticles.filter(a => {
+        if (
+          a.id.toLowerCase().includes(kw) ||
+          a.file.toLowerCase().includes(kw) ||
+          a.title.toLowerCase().includes(kw) ||
+          (a.outerTitle || '').toLowerCase().includes(kw)
+        ) {
+          return true;
+        }
+        if (a.fullPath && fs.existsSync(a.fullPath)) {
+          try {
+            const text = fs.readFileSync(a.fullPath, 'utf-8').slice(0, 3000).toLowerCase();
+            return text.includes(kw);
+          } catch {}
+        }
+        return false;
+      });
+    }
+
+    if (options.latest && options.latest > 0) {
+      scopedArticles = scopedArticles
+        .filter(a => a.fullPath && fs.existsSync(a.fullPath))
+        .map(a => {
+          let mtimeMs = 0;
+          try { mtimeMs = fs.statSync(a.fullPath).mtimeMs; } catch {}
+          return { article: a, mtimeMs };
+        })
+        .sort((x, y) => y.article.batch.localeCompare(x.article.batch) || (y.mtimeMs - x.mtimeMs))
+        .slice(0, options.latest)
+        .map(x => x.article);
+    }
+
+    // 在 --dry-run 且显式使用 --search 或 --latest 时，打印所有命中文章（包含已 skip 的现状），便于迅速查看定位
+    if (options.dryRun && (options.search || options.latest)) {
+      console.log(`\n--- [DRY-RUN 检索/最新匹配结果 (${scopedArticles.length} 篇)] ---`);
+      for (const a of scopedArticles) {
+        const plan = planArticleAction(a, options, legacyBaseline);
+        console.log(`* [${a.id}] status=${a.status} verified=${!!a.verification?.verified} appmsgid=${a.appmsgid || 'new'} action=${plan.action.toUpperCase()}`);
+        console.log(`    文件: ${a.fullPath}`);
+        console.log(`    完整标题: "${a.title}"`);
+        console.log(`    当前外题: "${a.outerTitle}"`);
+      }
+      if (scopedArticles.length === 0) {
+        console.log(`  (未匹配到任何文章)`);
+      }
+    }
+
+    let candidates = scopedArticles.filter(item => {
       const plan = planArticleAction(item, options, legacyBaseline);
 
       if (plan.action === 'skip') return false;
@@ -1066,21 +1216,12 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
         return false;
       }
 
-      // 日期过滤 (--days)
-      if (options.days && options.days > 0) {
-        const d = new Date();
-        d.setDate(d.getDate() - options.days);
-        const yyyy = d.getFullYear();
-        const mm = String(d.getMonth() + 1).padStart(2, '0');
-        const dd = String(d.getDate()).padStart(2, '0');
-        const cutoff = `${yyyy}${mm}${dd}`;
-        if (item.batch.slice(0, 8) < cutoff) return false;
-      }
-
       return true;
     });
 
-    candidates.sort((a, b) => a.id.localeCompare(b.id));
+    if (!options.latest) {
+      candidates.sort((a, b) => a.id.localeCompare(b.id));
+    }
 
     if (options.limit && options.limit > 0) {
       candidates = candidates.slice(0, options.limit);
@@ -1096,6 +1237,7 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
     if (options.dryRun) {
       console.log(`\n--- [DRY-RUN 待处理文章演练清单] ---`);
       let needsTitleCount = 0;
+      const missingTitleIds: string[] = [];
       for (const c of candidates) {
         const plan = planArticleAction(c, options, legacyBaseline);
         let resolvedTitle: string | undefined;
@@ -1106,13 +1248,35 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
           if (!String(error.message).startsWith('needs-title:')) throw error;
           titleProblem = error.message;
           needsTitleCount++;
+          missingTitleIds.push(c.id);
         }
         console.log(`* [${c.id}] action=${plan.action.toUpperCase()} appmsgid=${c.appmsgid || 'new'} file=${c.file}`);
         console.log(`    计划说明: ${plan.reason}`);
         console.log(`    完整标题: "${c.title}"`);
-        console.log(titleProblem ? `    [needs-title] ${titleProblem}` : `    外部标题: "${resolvedTitle}"`);
+        if (titleProblem) {
+          console.log(`    [needs-title] ${titleProblem}`);
+          if (c.fullPath && fs.existsSync(c.fullPath)) {
+            try {
+              const snippetLines = fs.readFileSync(c.fullPath, 'utf-8')
+                .split('\n')
+                .map(l => l.trim())
+                .filter(l => l && !l.startsWith('#'))
+                .slice(0, 2)
+                .join(' ');
+              if (snippetLines) {
+                console.log(`    内容摘要: ${snippetLines.slice(0, 120)}${snippetLines.length > 120 ? '...' : ''}`);
+              }
+            } catch {}
+          }
+        } else {
+          console.log(`    外部标题: "${resolvedTitle}"`);
+        }
       }
-      console.log(`[wechat-batch] 待补语义外题: ${needsTitleCount} 篇；正式写入仍要求标题校验通过。`);
+      if (needsTitleCount > 0) {
+        console.log(`[wechat-batch] 待补语义外题: ${needsTitleCount} 篇；可用 \`bun run titles "${missingTitleIds[0]}=<≤15字短标题>"\` 合并写入 titles-override.json。`);
+      } else {
+        console.log(`[wechat-batch] 待补语义外题: 0 篇；正式写入仍要求标题校验通过。`);
+      }
       console.log(`\n[wechat-batch] DRY-RUN 完成，未修改任何真实草稿或数据库文件。`);
       return 0;
     }
@@ -1136,7 +1300,7 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
       }
 
       if (i < candidates.length - 1) {
-        await sleep(4000);
+        await sleep(1200);
       }
     }
 

@@ -285,3 +285,42 @@ export async function prepareWechatBodyImageUpload(
 
   throw new Error(`Unable to reduce ${asset.filename} below 1MB for WeChat body upload.`);
 }
+
+export async function computeImageThumbnailRgba32(
+  buffer: Buffer,
+  hintContentType = "",
+  hintFileExt = "",
+  size = 32,
+): Promise<Uint8Array> {
+  const detected = detectImageFormatFromBuffer(buffer);
+  const contentType = detected?.contentType || hintContentType || "image/png";
+  const fileExt = detected?.fileExt || hintFileExt || ".png";
+  const image = await loadImageForProcessing({
+    buffer,
+    filename: `thumb${fileExt}`,
+    contentType,
+    fileExt,
+    fileSize: buffer.length,
+  });
+  const resized = image.clone();
+  resized.resize({ w: size, h: size });
+  return new Uint8Array(resized.bitmap.data);
+}
+
+export function computeNormalizedRgbMae(a: Uint8Array, b: Uint8Array): number {
+  if (a.length !== b.length || a.length === 0 || a.length % 4 !== 0) {
+    throw new Error(`Invalid RGBA buffer length for comparison: ${a.length} vs ${b.length}`);
+  }
+  const pixelCount = a.length / 4;
+  let totalDiff = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    const aAlpha = a[i + 3]! / 255;
+    const bAlpha = b[i + 3]! / 255;
+    for (let c = 0; c < 3; c++) {
+      const aVal = a[i + c]! * aAlpha + 255 * (1 - aAlpha);
+      const bVal = b[i + c]! * bAlpha + 255 * (1 - bAlpha);
+      totalDiff += Math.abs(aVal - bVal) / 255;
+    }
+  }
+  return totalDiff / (pixelCount * 3);
+}

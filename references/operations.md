@@ -17,13 +17,20 @@ Node.js 负责统一启动器，Bun 负责 TypeScript 运行时。正式写入�
 
 本机 `.agents/skills/wechat-mp-publisher` 与 `.zcode/skills/wechat-mp-publisher` 链接到同一代码库。修改仓库即可更新两处入口，不要再复制一套运行时。换设备时应先核对链接目标、私有配置与实际 CLI 帮助。
 
-## 2. 只读预检
+## 2. 只读预检与快捷检索
 
 ```bash
+# 完整扫描，列出所有待处理项及缺标题文章的内容摘要
 node bin/launch-publisher.mjs --check
+
+# 按关键词快速定位特定文章（匹配 ID、文件名、标题或正文前3000字，含已 SKIP 项）
+node bin/launch-publisher.mjs --check --search "GEM-15"
+
+# 按批次与修改时间倒序，直接查看最新 N 篇（默认 1 篇）
+node bin/launch-publisher.mjs --check --latest
 ```
 
-预检比较当前 PC 可见的两个来源与私有状态库。它不写历史、基线或进程锁，也不连接浏览器。未连通的 Muse 远端可能还有未到达本机的文件，因此只报告 PC 当前索引。
+预检比较当前 PC 可见的两个来源与私有状态库。它不写历史、基线或进程锁，也不连接浏览器。未连通的 Muse 远端可能还有未到达本机的文件，因此只报告 PC 当前索引。指定不存在的 `--id` 会报错退出码 1，不再当作“0任务”跳过。
 
 文章身份为 `source:batch:prefix`，例如 `muse:20261112_0700:01`。微信数字 `appmsgid` 是草稿 ID，两者不要混用。日常用 `articleId` 选择文章，由状态引擎找到对应草稿。
 
@@ -54,7 +61,14 @@ node bin/launch-publisher.mjs --check
 }
 ```
 
-该文件是 `articleId -> 短标题` 字典，不是草稿数字 ID 字典。已有文件先读取并合并，不能用本次新项覆盖其它映射。损坏 JSON 应先修复，不要当作空库。
+该文件是 `articleId -> 短标题` 字典，不是草稿数字 ID 字典。推荐使用内置安全工具添加或更新短标题（自动核验 15 字上限、fail-closed 保护损坏 JSON、原子合并写盘，不丢失既有项）：
+
+```bash
+bun run titles "muse:20261113_1105:01=GEM-15全球15米高程模型"
+bun run titles --list
+```
+
+也可以传入自定义 `--titles` 文件预检：
 
 ```bash
 node bin/launch-publisher.mjs --check --titles "C:/private/titles-override.json"
@@ -91,21 +105,21 @@ node bin/launch-publisher.mjs --titles "C:/private/titles-override.json"
 
 可以按实际帮助中的 `--source`、`--batch`、`--days`、`--limit` 缩小处理范围。已有验收稿会跳过，单篇失败不代表其余篇未执行；看逐篇结果和末尾汇总。
 
-复用宝玉路线的专用浏览器 Profile 与后台主页。按 Profile 查找调试端口，并使用 `/json/version` 返回的实际 WebSocket。只关闭本任务创建的编辑、复制和复验标签。不要关闭用户标签、终止其它 Edge 或反复弹扫码图片。
+复用宝玉路线的专用浏览器 Profile 与后台主页。按 Profile 查找调试端口，并使用 `/json/version` 返回的实际 WebSocket。若专用 Profile 尚无运行中的调试实例，引擎会以独立脱管进程安全拉起专用浏览器并等待就绪（绝不关闭或杀掉用户其它普通 Edge）。只关闭本任务创建的编辑、复制和复验标签。不要关闭用户标签或反复弹扫码图片。
 
 登录失效时报告需要续期；模型服务商拒绝子 agent 请求与公众号登录失败是两件不同的事。
 
 ## 6. 保存与独立验收
 
-每次保存都需要独立新标签从服务器打开同一草稿 ID，并检查：
+每次保存都需要独立新标签从服务器打开同一草稿 ID，通过条件轮询等待标题、封面、正文图片与名片真正加载后检查：
 
 1. 重开 ID 与保存 ID 相同。
 2. 首元素为唯一完整原题 H1，作者和外题正确。
 3. 正文文字与保存前一致，没有图片占位符、定位标记或本地图片路径。
-4. 图片素材身份及顺序一致，全部加载且有有效尺寸。
+4. 图片素材数量、顺序与加载均正常（`complete && naturalWidth > 0` 且为合法 qpic 域名）。
 5. 封面 URL 实际有效，原生名片账号正确且居于正文末尾。
 
-微信将同一合法 qpic 素材从 `/0` 显示尺寸改成 `/640` 时可以规范化比较；不能因此放宽其它素材路径或图片顺序。
+微信将同一合法 qpic 素材从 `/0` 显示尺寸改成 `/640` 时优先通过规范化 URL 比较；若微信服务端落库时因去重或重签名改变素材 URL 路径，则以 32×32 RGBA 内存像素交叉 MAE 验证各位置图片内容及顺序完全匹配，不放宽错图或乱序。
 
 保存取得 ID 后先记录 `saved-unverified`。微信也可能自动保存新稿；失败重跑前应核对并保全已分配的 ID，避免重复创建。自动保存、toast 和回包均不能单独算验收通过。
 

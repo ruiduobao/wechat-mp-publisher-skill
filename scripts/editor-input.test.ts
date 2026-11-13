@@ -101,8 +101,9 @@ test('选区漂移或占位符重复时不发送替换输入', async () => {
   expect(duplicate.inputs).toHaveLength(0);
 });
 
-function pasteSession(trusted = true, htmlAvailable = true) {
+function pasteSession(trusted = true, htmlAvailable = true, staleFirst = false) {
   const calls: Array<{ method: string; params: any; session?: string }> = [];
+  let reads = 0;
   const session: EditorSession = { sessionId: 'body', targetId: 'article', cdp: { async send(method, params, options): Promise<any> {
     calls.push({ method, params, session: options?.sessionId });
     if (method === 'Target.createTarget') return { targetId: 'copy-tab' };
@@ -112,7 +113,11 @@ function pasteSession(trusted = true, htmlAvailable = true) {
       const expr = params?.expression || '';
       let value: any = true;
       if (expr.includes('return output.textContent')) value = '完整标题正文';
-      if (expr.includes('actualText: editor?.textContent')) value = { trusted, htmlAvailable, actualText: '完整标题正文' };
+      if (expr.includes('actualText: editor?.textContent')) {
+        reads++;
+        const actualText = staleFirst && reads === 1 ? '旧正文尚未被粘贴替换' : '完整标题正文';
+        value = { trusted, htmlAvailable, actualText };
+      }
       return { result: { value } };
     }
     return {};
@@ -120,8 +125,8 @@ function pasteSession(trusted = true, htmlAvailable = true) {
   return { session, calls };
 }
 
-test('原生粘贴只在复制标签复制、在正文标签粘贴，并关闭复制页', async () => {
-  const { session, calls } = pasteSession();
+test('原生粘贴只在复制标签复制、在正文标签粘贴，并关闭复制页，且等待旧正文替换完成', async () => {
+  const { session, calls } = pasteSession(true, true, true);
   const result = await pasteHtmlNatively(session, '<h1>完整标题</h1><p>正文</p>');
   expect(result.trusted).toBe(true);
   expect(result.actualText).toBe(result.expectedText);

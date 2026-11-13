@@ -42,6 +42,8 @@ import { convertMarkdown } from './md-to-wechat.ts';
 import {
   prepareWechatBodyImageUpload,
   needsWechatBodyImageProcessing,
+  computeImageThumbnailRgba32,
+  computeNormalizedRgbMae,
   type WechatUploadAsset,
 } from './wechat-image-processor.ts';
 import { BODY_EDITOR_SELECTOR, evaluatePage, escapeHtml, type EditorSession } from './editor-features.ts';
@@ -110,6 +112,126 @@ export function wechatImageIdentity(urlStr: string): string {
   const url = new URL(urlStr);
   url.pathname = url.pathname.replace(/\/(?:0|640)$/, '/display-size');
   return url.toString();
+}
+
+export interface ReopenImageVerifyResult {
+  matched: boolean;
+  method: 'empty' | 'url-identity' | 'pixel-mae' | 'mismatch';
+  maxMae?: number;
+  reason?: string;
+}
+
+export async function verifyReopenedImagesMatch(
+  beforeUrls: string[],
+  afterUrls: string[],
+  options: {
+    localImagePaths?: string[];
+    maeThreshold?: number;
+    fetchUrlBuffer?: (url: string) => Promise<{ buffer: Buffer; contentType: string }>;
+  } = {},
+): Promise<ReopenImageVerifyResult> {
+  if (beforeUrls.length !== afterUrls.length) {
+    return {
+      matched: false,
+      method: 'mismatch',
+      reason: `图片数量不一致: 保存前 ${beforeUrls.length} 张, 重开后 ${afterUrls.length} 张`,
+    };
+  }
+  if (afterUrls.length === 0) {
+    return { matched: true, method: 'empty' };
+  }
+  for (let i = 0; i < afterUrls.length; i++) {
+    if (!isWechatCdnHostname(afterUrls[i]!)) {
+      return {
+        matched: false,
+        method: 'mismatch',
+        reason: `重开第 ${i + 1} 张图片非合法微信 CDN 地址: ${afterUrls[i]}`,
+      };
+    }
+  }
+
+  const allUrlsEqual = beforeUrls.every((u, idx) => wechatImageIdentity(u) === wechatImageIdentity(afterUrls[idx]!));
+  if (allUrlsEqual) {
+    return { matched: true, method: 'url-identity' };
+  }
+
+  // 微信在保存落库时可能对已有素材执行去重或重新签名，导致 URL 路径变化；
+  // 此时严格拉取像素做 32x32 归一化 RGB MAE 与交叉顺序校验，绝不退化成只比数量。
+  const maeThreshold = options.maeThreshold ?? 0.06;
+  const defaultFetch = async (url: string) => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+    const contentType = res.headers.get('content-type') || '';
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { buffer: buf, contentType };
+  };
+  const fetcher = options.fetchUrlBuffer || defaultFetch;
+
+  try {
+    const useLocalSources = !!(
+      options.localImagePaths &&
+      options.localImagePaths.length === afterUrls.length &&
+      options.localImagePaths.every((p) => fs.existsSync(p))
+    );
+
+    const expectedThumbs: Uint8Array[] = [];
+    for (let i = 0; i < afterUrls.length; i++) {
+      if (useLocalSources) {
+        const localPath = options.localImagePaths![i]!;
+        const buf = fs.readFileSync(localPath);
+        const ext = path.extname(localPath).toLowerCase();
+        expectedThumbs.push(await computeImageThumbnailRgba32(buf, '', ext));
+      } else {
+        const downloaded = await fetcher(beforeUrls[i]!);
+        expectedThumbs.push(await computeImageThumbnailRgba32(downloaded.buffer, downloaded.contentType));
+      }
+    }
+
+    const actualThumbs: Uint8Array[] = [];
+    for (let i = 0; i < afterUrls.length; i++) {
+      const downloaded = await fetcher(afterUrls[i]!);
+      actualThumbs.push(await computeImageThumbnailRgba32(downloaded.buffer, downloaded.contentType));
+    }
+
+    let maxMae = 0;
+    for (let i = 0; i < afterUrls.length; i++) {
+      const diagMae = computeNormalizedRgbMae(expectedThumbs[i]!, actualThumbs[i]!);
+      if (diagMae > maxMae) maxMae = diagMae;
+      if (diagMae > maeThreshold) {
+        return {
+          matched: false,
+          method: 'mismatch',
+          maxMae: diagMae,
+          reason: `第 ${i + 1} 张图片像素 MAE 过高 (${diagMae.toFixed(4)} > ${maeThreshold})`,
+        };
+      }
+      if (afterUrls.length > 1) {
+        let minRowMae = diagMae;
+        for (let j = 0; j < afterUrls.length; j++) {
+          if (j === i) continue;
+          const crossMae = computeNormalizedRgbMae(expectedThumbs[i]!, actualThumbs[j]!);
+          if (crossMae < minRowMae) minRowMae = crossMae;
+        }
+        // 如果对角线明显劣于其它位置，说明图片顺序错乱
+        if (diagMae - minRowMae > 0.005) {
+          return {
+            matched: false,
+            method: 'mismatch',
+            maxMae: diagMae,
+            reason: `第 ${i + 1} 张图片顺序或素材不匹配 (自身MAE=${diagMae.toFixed(4)}, 最优交叉MAE=${minRowMae.toFixed(4)})`,
+          };
+        }
+      }
+    }
+
+    return { matched: true, method: 'pixel-mae', maxMae };
+  } catch (err: any) {
+    return {
+      matched: false,
+      method: 'mismatch',
+      reason: `像素一致性校验异常: ${err?.message || err}`,
+    };
+  }
 }
 
 export function isWechatCdnHostname(urlStr: string): boolean {
@@ -861,7 +983,7 @@ export async function locatePlaceholderAndSetAnchor(
   placeholder: string,
   anchorId: string
 ): Promise<boolean> {
-  const selected = await evaluatePage<{ expectedText: string } | null>(session, `(() => {
+  const selectPlaceholderExpr = `(() => {
     const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
     if (!editor) return null;
     const target = ${JSON.stringify(placeholder)};
@@ -891,22 +1013,37 @@ export async function locatePlaceholderAndSetAnchor(
       }
     }
     return null;
-  })()`);
-  if (!selected) return false;
-  await new Promise(resolve => setTimeout(resolve, 150));
-  const selectionReady = await evaluatePage<boolean>(session, `(() => {
+  })()`;
+
+  const selectionCheckExpr = `(() => {
     const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
     const selection = getSelection();
     return !!editor && document.activeElement === editor && !!selection &&
       editor.contains(selection.anchorNode) && editor.contains(selection.focusNode) &&
       selection.toString() === ${JSON.stringify(placeholder)};
-  })()`);
-  if (!selectionReady) {
+  })()`;
+
+  let selected: { expectedText: string } | null = null;
+  let selectionReady = false;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0 && session.targetId) {
+      await session.cdp.send('Target.activateTarget', { targetId: session.targetId }).catch(() => {});
+    }
+    selected = await evaluatePage<{ expectedText: string } | null>(session, selectPlaceholderExpr);
+    if (!selected) return false;
+    await new Promise(resolve => setTimeout(resolve, 120));
+    selectionReady = await evaluatePage<boolean>(session, selectionCheckExpr);
+    if (selectionReady) break;
+  }
+
+  if (!selected || !selectionReady) {
     await evaluatePage(session, `delete window[${JSON.stringify(anchorId)}]`);
     return false;
   }
+
   await session.cdp.send('Input.insertText', { text: `⟦${anchorId}⟧` }, { sessionId: session.sessionId });
-  await new Promise(resolve => setTimeout(resolve, 150));
+  await new Promise(resolve => setTimeout(resolve, 120));
   const replaced = await evaluatePage<boolean>(session, `document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)})?.textContent === ${JSON.stringify(selected.expectedText)}`);
   if (!replaced) {
     await evaluatePage(session, `delete window[${JSON.stringify(anchorId)}]`);
@@ -957,16 +1094,16 @@ export async function waitForTargetImageLoaded(
         return false;
       })()`);
       if (!selected) throw new Error('[article-content] 上传后定位标记丢失，未保存');
-      await new Promise(resolve => setTimeout(resolve, 150));
+      await new Promise(resolve => setTimeout(resolve, 120));
       await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, { sessionId: session.sessionId });
       await session.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 }, { sessionId: session.sessionId });
-      await new Promise(resolve => setTimeout(resolve, 150));
+      await new Promise(resolve => setTimeout(resolve, 120));
       const markerRemoved = await evaluatePage<boolean>(session, `!document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)}).textContent.includes(${JSON.stringify(`⟦${anchorId}⟧`)})`);
       if (!markerRemoved) throw new Error('[article-content] 图片定位标记未被编辑器删除，未保存');
       await evaluatePage(session, `delete window[${JSON.stringify(anchorId)}]`);
       return { ok: true, src: state.src };
     }
-    await new Promise(resolve => setTimeout(resolve, 600));
+    await new Promise(resolve => setTimeout(resolve, 300));
   }
   return { ok: false, error: `等待目标微信 CDN 图片就绪超时 (${timeoutMs}ms)` };
 }

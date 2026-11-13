@@ -1,4 +1,4 @@
-import { BODY_EDITOR_SELECTOR, evaluatePage, sleep, type EditorSession } from './editor-features.ts';
+import { BODY_EDITOR_SELECTOR, evaluatePage, pollUntil, sleep, type EditorSession } from './editor-features.ts';
 
 export interface NativePasteResult {
   trusted: boolean;
@@ -38,7 +38,7 @@ export async function pasteHtmlNatively(session: EditorSession, html: string, se
       return output.textContent || '';
     })()`);
     await shortcut(clipboardSession, 'c');
-    await sleep(200);
+    await sleep(120);
     await session.cdp.send('Target.closeTarget', { targetId: clipboardTarget });
     clipboardTarget = undefined;
     if (session.targetId) await session.cdp.send('Target.activateTarget', { targetId: session.targetId });
@@ -59,14 +59,27 @@ export async function pasteHtmlNatively(session: EditorSession, html: string, se
       return document.activeElement === editor && editor.contains(selection.anchorNode) && editor.contains(selection.focusNode);
     })()`);
     if (!ready) throw new Error('native-paste: body selection is not ready');
-    await sleep(150);
+    await sleep(80);
     await shortcut(session, 'v');
-    await sleep(500);
-    const result = await evaluatePage<NativePasteResult>(session, `(() => {
-      const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
-      const evidence = window[${JSON.stringify(evidenceKey)}];
-      return { trusted: !!evidence?.trusted, htmlAvailable: !!evidence?.htmlAvailable, actualText: editor?.textContent || '' };
-    })()`);
+    const normalize = (text: string) => text.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
+    const expectedNorm = normalize(expectedText);
+    const result = await pollUntil<NativePasteResult>(async () => {
+      const state = await evaluatePage<NativePasteResult>(session, `(() => {
+        const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+        const evidence = window[${JSON.stringify(evidenceKey)}];
+        return { trusted: !!evidence?.trusted, htmlAvailable: !!evidence?.htmlAvailable, actualText: editor?.textContent || '' };
+      })()`);
+      if (state.trusted && state.htmlAvailable && (!expectedNorm || normalize(state.actualText) === expectedNorm)) {
+        return state;
+      }
+      return false;
+    }, 3000, 100, 'trusted paste completion').catch(async () => {
+      return await evaluatePage<NativePasteResult>(session, `(() => {
+        const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+        const evidence = window[${JSON.stringify(evidenceKey)}];
+        return { trusted: !!evidence?.trusted, htmlAvailable: !!evidence?.htmlAvailable, actualText: editor?.textContent || '' };
+      })()`);
+    });
     if (!result.trusted || !result.htmlAvailable) throw new Error('native-paste: editor did not receive a trusted HTML paste');
     return { ...result, expectedText };
   } finally {
