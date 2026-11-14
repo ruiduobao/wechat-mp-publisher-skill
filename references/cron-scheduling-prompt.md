@@ -10,7 +10,7 @@ node "C:/Users/Administrator/wechat-mp-publisher-skill/bin/launch-publisher.mjs"
 
 预检与核查纯读，不建锁、不写历史/基线、不触碰浏览器。没有可执行工作就退出。仅能声称“PC 当前索引无新文件”，不能推断未连通的 Muse 远端没有内容。
 
-**每次有同步文件时，第一件事就是核对推文真实性**：通过 `bun run verify` / `--check --verify` 核实论文是否存在、DOI (Crossref/doi.org) 与 arXiv 编号解析出的真实标题是否与推文一致、原文链接是否可达、本地图片无损坏。遇到 404 假 DOI、标题张冠李戴或幻觉残留直接阻断；遇到 403/无 DOI 警告时联网核查确认真实性后再同步。
+**每次有同步文件时，第一件事就是核对推文真实性**：通过 `bun run verify` / `--check --verify` 核实论文是否存在、DOI (Crossref/doi.org) 与 arXiv 编号解析出的真实标题是否与推文一致、原文链接是否可达、本地图片无损坏。遇到 404、标题不符或 403/无 DOI 警告时，**必须进一步前往期刊/出版社/arXiv/Dryad 官方网站二次核实**：若官网证实为刚上线尚未同步至 `doi.org` 的真实 DOI（或仅遇反爬 403），核实无误后可显式 `--id <articleId> --skip-verify` 同步；若官网核对出可修正的明确笔误并据实改正确认通过，再同步至草稿箱；仅对官网查无此文、假造或无法修正核实的文章坚决拦截，绝不写入草稿箱。
 
 有就绪任务时：
 
