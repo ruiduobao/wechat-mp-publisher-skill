@@ -68,6 +68,9 @@ node bin/launch-publisher.mjs --refresh-content --id <articleId>
 
 # 批量任务
 node bin/launch-publisher.mjs --titles "C:/Users/Administrator/.agents/skills/wechat-md-pipeline/data/titles-override.json"
+
+# 轻量登录态保活（仅静默访问后台首页顺延 96 小时滑动 Cookie，不扫描或改写草稿）
+node bin/launch-publisher.mjs --keepalive
 ```
 
 只使用 `--help` 实际提供的参数；没有 `--covers` 参数。`--title-override` 仅限单篇模式（未配合 `--id`/`--latest 1`/`--search` 时被门禁拦截退出码 2）。正式写入前启动器自动执行 TypeScript 检查，失败即停止。

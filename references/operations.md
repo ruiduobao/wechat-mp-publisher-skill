@@ -116,6 +116,14 @@ node bin/launch-publisher.mjs --titles "C:/private/titles-override.json"
 
 登录失效时报告需要续期；模型服务商拒绝子 agent 请求与公众号登录失败是两件不同的事。
 
+微信公众号后台为 `slave_sid` 等核心认证 Cookie 下发的默认有效期为 **96 小时（4 天）滑动过期**，且 `uuid` 为会话级 Cookie。若连续超过 4 天没有新推文写入草稿箱（`--check` 只读模式不会触碰浏览器），建议保持专用 Edge 窗口常驻，并每天执行一次轻量保活命令（仅静默请求后台首页刷新滑动 Cookie，不扫描、不建稿、不改稿）：
+
+```bash
+bun run keepalive
+# 或
+node bin/launch-publisher.mjs --keepalive
+```
+
 ## 6. 保存与独立验收
 
 每次保存都需要独立新标签从服务器打开同一草稿 ID，通过条件轮询等待标题、封面、正文图片与名片真正加载后检查：

@@ -73,6 +73,7 @@ const WECHAT_URL = 'https://mp.weixin.qq.com/';
 // -----------------------------------------------------------------------------
 export interface BatchCliOptions {
   dryRun: boolean;
+  keepalive?: boolean;
   repair: boolean;
   refreshContent: boolean;
   verify?: boolean;
@@ -99,6 +100,7 @@ export function printHelpAndExit(): never {
 
 选项:
   --dry-run                 纯读演练模式 (不获取锁、不修改磁盘、不触碰浏览器)
+  --keepalive               轻量续期公众号登录态 (仅静默刷新后台首页顺延 Cookie，不扫描或改写草稿)
   --verify                  配合 --check 运行在线论文真实性与 DOI/arXiv/链接核查
   --skip-verify             显式跳过正式写入前的在线 DOI/arXiv 真实性门禁
   --strict-verify           严格核查模式 (遇到警告如无DOI/链接403也阻断发布)
@@ -121,6 +123,7 @@ export function printHelpAndExit(): never {
 export function parseBatchArgs(): BatchCliOptions {
   const args = process.argv.slice(2);
   let dryRun = false;
+  let keepalive = false;
   let verify = false;
   let skipVerify = false;
   let strictVerify = false;
@@ -143,6 +146,8 @@ export function parseBatchArgs(): BatchCliOptions {
       printHelpAndExit();
     } else if (a === '--dry-run') {
       dryRun = true;
+    } else if (a === '--keepalive') {
+      keepalive = true;
     } else if (a === '--verify') {
       verify = true;
     } else if (a === '--skip-verify') {
@@ -243,6 +248,12 @@ export function parseBatchArgs(): BatchCliOptions {
     }
   }
 
+  // 严格门禁：--keepalive 不能与 --dry-run 同时使用
+  if (keepalive && dryRun) {
+    console.error('❌ 参数错误: --keepalive 不能与 --dry-run / --check 同时使用');
+    process.exit(2);
+  }
+
   // 严格门禁：--refresh-content 必须与 --id 配合，防止全量覆盖已有稿件
   if (refreshContent && !id) {
     console.error('❌ 参数错误: --refresh-content 必须与 --id <articleId> 配合使用 (避免全量重建已有稿件)');
@@ -255,7 +266,7 @@ export function parseBatchArgs(): BatchCliOptions {
     process.exit(2);
   }
 
-  return { dryRun, verify, skipVerify, strictVerify, repair, refreshContent, id, search, latest, limit, batch, days, source, titleOverride, titlesFile, titleMap };
+  return { dryRun, keepalive, verify, skipVerify, strictVerify, repair, refreshContent, id, search, latest, limit, batch, days, source, titleOverride, titlesFile, titleMap };
 }
 
 // -----------------------------------------------------------------------------
@@ -1163,13 +1174,73 @@ export async function processSingleArticle(
   }
 }
 
+async function getWechatAuthCookieExpiry(cdp: CdpConnection): Promise<{ name: string; expiresIso: string; remainingHours: number } | null> {
+  try {
+    const res = await cdp.send<{ cookies?: Array<{ name: string; domain: string; session: boolean; expires: number }> }>('Storage.getCookies');
+    const target = (res.cookies || []).find(
+      c => c.domain.includes('weixin.qq.com') && !c.session && (c.name === 'slave_sid' || c.name === 'data_ticket') && c.expires > 0
+    );
+    if (!target) return null;
+    const expiresMs = target.expires * 1000;
+    const remainingHours = Math.max(0, (expiresMs - Date.now()) / 3_600_000);
+    return {
+      name: target.name,
+      expiresIso: new Date(expiresMs).toISOString(),
+      remainingHours: Number(remainingHours.toFixed(1)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function runKeepaliveSession(): Promise<number> {
+  const connected = await connectOrCreateHomeSession();
+  try {
+    console.log(`[wechat-batch] ✅ 公众号后台会话就绪，Token: ***${connected.token.slice(-4)}`);
+    const before = await getWechatAuthCookieExpiry(connected.cdp);
+
+    const check = await evaluatePage<{ ok: boolean; status: number; hasToken: boolean; isLoginPage: boolean }>(
+      connected.homeSession,
+      `(async () => {
+        const res = await fetch('/cgi-bin/home?t=home/index&lang=zh_CN&token=' + encodeURIComponent(${JSON.stringify(connected.token)}), {
+          credentials: 'include',
+        });
+        const html = await res.text();
+        return {
+          ok: res.ok,
+          status: res.status,
+          hasToken: res.url.includes('token='),
+          isLoginPage: html.includes('login_frame') || html.includes('扫码登录') && !html.includes('new-creation__menu'),
+        };
+      })()`
+    );
+
+    if (!check.ok || !check.hasToken || check.isLoginPage) {
+      throw new Error(`[wechat-batch] 公众号后台登录态已失效 (HTTP ${check.status}, hasToken=${check.hasToken})，请在专用浏览器扫码续期后重试 (needs-attention)`);
+    }
+
+    const after = await getWechatAuthCookieExpiry(connected.cdp);
+    if (after) {
+      const slidNote = before && after.expiresIso !== before.expiresIso
+        ? ` (已从 ${before.expiresIso} 顺延)`
+        : '';
+      console.log(`[wechat-batch] 🔄 轻量保活成功: ${after.name} 有效期至 ${after.expiresIso} (剩余约 ${after.remainingHours} 小时)${slidNote}`);
+    } else {
+      console.log(`[wechat-batch] 🔄 轻量保活成功: 后台首页心跳响应正常 (HTTP ${check.status})`);
+    }
+    return 0;
+  } finally {
+    try { connected.cdp.close(); } catch {}
+  }
+}
+
 // -----------------------------------------------------------------------------
 // 主编排执行入口
 // -----------------------------------------------------------------------------
 export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs()): Promise<number> {
   console.log(`================================================================`);
   console.log(`[wechat-batch] 微信公众号草稿箱在原草稿更新与发布引擎 (Safe Spine + E 接线)`);
-  console.log(`  模式: ${options.dryRun ? 'DRY-RUN (纯读演练)' : options.repair ? 'REPAIR (原稿精修)' : 'FULL-PIPELINE'}`);
+  console.log(`  模式: ${options.dryRun ? 'DRY-RUN (纯读演练)' : options.keepalive ? 'KEEPALIVE (轻量登录态保活)' : options.repair ? 'REPAIR (原稿精修)' : 'FULL-PIPELINE'}`);
   if (options.id) console.log(`  单篇过滤: ${options.id}`);
   if (options.search) console.log(`  关键词检索: "${options.search}"`);
   if (options.latest) console.log(`  最新推文选取: 最近 ${options.latest} 篇`);
@@ -1179,7 +1250,7 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
 
   let lockAcquired = false;
   if (!options.dryRun) {
-    lockAcquired = acquireProcessLock('batch-fast-wechat');
+    lockAcquired = acquireProcessLock(options.keepalive ? 'batch-fast-wechat-keepalive' : 'batch-fast-wechat');
     if (!lockAcquired) {
       console.error(`[wechat-batch] ❌ 无法获取进程锁，可能另有实例正在运行，退出。`);
       return 1;
@@ -1187,6 +1258,9 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
   }
 
   try {
+    if (options.keepalive) {
+      return await runKeepaliveSession();
+    }
     const legacyBaseline = getOrCreateLegacyBaseline({ persist: !options.dryRun });
 
     // 锁内先持久化当前合并记录 (新文在此刻已入库，status: untracked，避免 record 时找不到 target)

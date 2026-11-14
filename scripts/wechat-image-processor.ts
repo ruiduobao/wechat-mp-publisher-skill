@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -136,6 +137,80 @@ async function ensureWebpDecoder(): Promise<void> {
   await webpDecoderReady;
 }
 
+async function decodeImageViaPythonPillow(buffer: Buffer): Promise<JimpImage | null> {
+  const pyScript = [
+    "import io, struct, sys",
+    "from PIL import Image, ImageFile",
+    "ImageFile.LOAD_TRUNCATED_IMAGES = True",
+    "data = sys.stdin.buffer.read()",
+    "im = Image.open(io.BytesIO(data))",
+    "im.load()",
+    "rgba = im.convert('RGBA')",
+    "sys.stdout.buffer.write(struct.pack('>II', rgba.width, rgba.height))",
+    "sys.stdout.buffer.write(rgba.tobytes())",
+  ].join("\n");
+
+  for (const bin of ["python", "python3"]) {
+    const decoded = await new Promise<JimpImage | null>((resolve) => {
+      let settled = false;
+      const finish = (val: JimpImage | null) => {
+        if (!settled) {
+          settled = true;
+          resolve(val);
+        }
+      };
+
+      const child = spawn(bin, ["-I", "-c", pyScript], {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      const chunks: Buffer[] = [];
+      let totalLen = 0;
+      const MAX_BYTES = 128 * 1024 * 1024;
+      const timer = setTimeout(() => {
+        try { child.kill(); } catch {}
+        finish(null);
+      }, 20_000);
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        totalLen += chunk.length;
+        if (totalLen <= MAX_BYTES) chunks.push(chunk);
+      });
+      child.on("error", () => {
+        clearTimeout(timer);
+        finish(null);
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (code !== 0 || totalLen < 8 || totalLen > MAX_BYTES) {
+          finish(null);
+          return;
+        }
+        const out = Buffer.concat(chunks, totalLen);
+        const width = out.readUInt32BE(0);
+        const height = out.readUInt32BE(4);
+        const expected = 8 + width * height * 4;
+        if (width <= 0 || height <= 0 || out.length !== expected) {
+          finish(null);
+          return;
+        }
+        finish(new Jimp({
+          data: out.subarray(8),
+          width,
+          height,
+        }));
+      });
+
+      child.stdin.on("error", () => {});
+      child.stdin.end(buffer);
+    });
+
+    if (decoded) return decoded;
+  }
+
+  return null;
+}
+
 async function loadImageForProcessing(asset: WechatUploadAsset): Promise<JimpImage> {
   const fileExt = ensureFileExt(asset);
   const normalizedMimeType = normalizeMimeType(asset.contentType);
@@ -156,8 +231,16 @@ async function loadImageForProcessing(asset: WechatUploadAsset): Promise<JimpIma
     throw new Error(`Cannot convert ${fileExt} image for WeChat body upload; provide a PNG or JPG instead.`);
   }
 
-  const readImage = await Jimp.read(asset.buffer);
-  return readImage as unknown as JimpImage;
+  try {
+    const readImage = await Jimp.read(asset.buffer);
+    return readImage as unknown as JimpImage;
+  } catch (jimpError) {
+    const fallback = await decodeImageViaPythonPillow(asset.buffer);
+    if (fallback) {
+      return fallback;
+    }
+    throw jimpError;
+  }
 }
 
 function imageHasTransparency(image: JimpImage): boolean {

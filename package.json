@@ -12,11 +12,12 @@
     "launch": "node bin/launch-publisher.mjs",
     "batch": "node bin/launch-publisher.mjs",
     "sync": "bun run scripts/sync-wechat-drafts.ts",
+    "keepalive": "node bin/launch-publisher.mjs --keepalive",
     "titles": "bun run scripts/set-titles.ts",
     "verify": "bun run scripts/verify-article.ts",
     "article": "bun run scripts/wechat-article.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun run scripts/editor-features.test.ts && bun test scripts/article-content.test.ts scripts/editor-mode.test.ts scripts/editor-input.test.ts scripts/draft-recovery.test.ts scripts/batch-cli.test.ts scripts/verify-article.test.ts scripts/layout-clean.test.ts && bun run tests/draft-state.test.ts"
+    "test": "bun run scripts/editor-features.test.ts && bun test scripts/article-content.test.ts scripts/editor-mode.test.ts scripts/editor-input.test.ts scripts/draft-recovery.test.ts scripts/batch-cli.test.ts scripts/verify-article.test.ts scripts/layout-clean.test.ts scripts/wechat-image-processor.test.ts && bun run tests/draft-state.test.ts"
   },
   "keywords": [
     "wechat",

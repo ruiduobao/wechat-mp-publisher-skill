@@ -137,6 +137,10 @@ node bin/launch-publisher.mjs --repair --id <articleId>                    # 仅
 node bin/launch-publisher.mjs --refresh-content --id <articleId>           # 在原草稿上按源文重建完整正文与图片
 node bin/launch-publisher.mjs --titles "<path/to/titles-override.json>"    # 批量同步就绪文章
 
+# 轻量登录态保活（每天执行一次，静默刷新后台首页顺延 96 小时滑动 Cookie，不改写草稿）
+bun run keepalive
+node bin/launch-publisher.mjs --keepalive
+
 # 轻量单篇脚本（直接指定本地单个 Markdown 文件快速推送草稿）
 bun run article --markdown "path/to/post.md" --title "短标题" --author "作者" --submit
 

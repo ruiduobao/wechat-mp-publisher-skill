@@ -187,6 +187,16 @@ test('CLI --search / --latest / 不存在ID / --title-override 门禁均按预�
     expect(overrideErrRes.status).toBe(2);
     expect(overrideErrRes.stderr).toContain('--title-override 仅限单篇模式');
 
+    // 5. --keepalive 与 --check/--dry-run 互斥门禁，直接返回退出码 2
+    const keepaliveErrRes = spawnSync('node', [launcher, '--check', '--keepalive'], { encoding: 'utf8', env });
+    expect(keepaliveErrRes.status).toBe(2);
+    expect(keepaliveErrRes.stderr).toContain('--keepalive 不能与 --dry-run');
+
+    // 6. --help 包含 --keepalive 参数说明
+    const helpRes = spawnSync('node', [launcher, '--help'], { encoding: 'utf8', env });
+    expect(helpRes.status).toBe(0);
+    expect(helpRes.stdout).toContain('--keepalive');
+
     expect(fs.existsSync(state)).toBe(false); // 只读预检零磁盘副作用
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
