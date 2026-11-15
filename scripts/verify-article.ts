@@ -64,6 +64,7 @@ export interface VerifyOptions {
   timeoutMs?: number;
   fetchFn?: typeof fetch;
   articleId?: string;
+  markdownOverride?: string;
 }
 
 function cleanTrailingPunctuation(raw: string): string {
@@ -404,7 +405,7 @@ export async function verifyArticleTruth(filePath: string, options: VerifyOption
   if (!fs.existsSync(filePath)) {
     throw new Error(`找不到源文件: ${filePath}`);
   }
-  const markdown = fs.readFileSync(filePath, 'utf-8');
+  const markdown = options.markdownOverride ?? fs.readFileSync(filePath, 'utf-8');
   const baseDir = path.dirname(filePath);
   const extracted = extractArticleClaims(markdown, filePath);
 

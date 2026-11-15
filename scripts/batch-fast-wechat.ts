@@ -63,7 +63,7 @@ import {
   type RenderArticleResult,
 } from './article-content.ts';
 import { assertArticleEditor } from './editor-mode.ts';
-import { verifyArticleTruth } from './verify-article.ts';
+import { verifyArticleTruth, type ArticleVerificationReport } from './verify-article.ts';
 export { evaluateEditorMessageType, type EditorTypeSnapshot } from './editor-mode.ts';
 
 const WECHAT_URL = 'https://mp.weixin.qq.com/';
@@ -666,6 +666,70 @@ export function loadPrivateCoverOverrides(customPath?: string): Record<string, s
   return parsed;
 }
 
+export const PRIVATE_CONTENT_CORRECTIONS_PATH = 'C:\\Users\\Administrator\\.agents\\skills\\wechat-md-pipeline\\data\\content-corrections.json';
+
+export interface ContentCorrectionRule {
+  find: string;
+  replaceWith: string;
+  note?: string;
+}
+
+export interface LoadedContentCorrections {
+  map: Record<string, ContentCorrectionRule[]>;
+  path: string;
+}
+
+export function loadContentCorrections(customPath?: string): LoadedContentCorrections {
+  const filePath = customPath || process.env.WECHAT_CONTENT_CORRECTIONS_FILE || PRIVATE_CONTENT_CORRECTIONS_PATH;
+  if (!fs.existsSync(filePath)) return { map: {}, path: filePath };
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (err: any) {
+    throw new Error(`[wechat-batch] FATAL: 内容修正映射文件 JSON 格式损坏: ${filePath} (${err.message})`);
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`[wechat-batch] FATAL: 内容修正映射文件结构错误，必须为 { articleId: [{ find, replaceWith }] } 字典: ${filePath}`);
+  }
+
+  for (const [articleId, rules] of Object.entries(parsed)) {
+    if (!Array.isArray(rules) || rules.length === 0) {
+      throw new Error(`[wechat-batch] FATAL: 内容修正映射文件 ${articleId} 的规则必须为非空数组: ${filePath}`);
+    }
+    for (const rule of rules as any) {
+      if (typeof rule?.find !== 'string' || rule.find.length === 0 || typeof rule?.replaceWith !== 'string') {
+        throw new Error(`[wechat-batch] FATAL: 内容修正映射文件 ${articleId} 存在非法规则 (find 必须为非空字符串，replaceWith 必须为字符串): ${filePath}`);
+      }
+    }
+  }
+
+  return { map: parsed as Record<string, ContentCorrectionRule[]>, path: filePath };
+}
+
+export function applyContentCorrections(
+  markdown: string,
+  articleId: string,
+  corrections?: LoadedContentCorrections
+): string {
+  const rules = corrections?.map[articleId];
+  if (!rules || rules.length === 0) return markdown;
+  let applied: string[] = [];
+  let corrected = markdown;
+  for (const rule of rules) {
+    if (corrected.includes(rule.find)) {
+      corrected = corrected.split(rule.find).join(rule.replaceWith);
+      applied.push(`${rule.find} -> ${rule.replaceWith}${rule.note ? ` (${rule.note})` : ''}`);
+    }
+  }
+  if (applied.length > 0) {
+    console.log(`[content-corrections] ✅ 已按私有修正映射改写 ${articleId} 的内存内容 (${applied.length} 处，源文件保持只读):`);
+    for (const a of applied) console.log(`    - ${a}`);
+  }
+  return corrected;
+}
+
 // -----------------------------------------------------------------------------
 // 标题决策工具 (不盲截，优先使用显式映射或已有外层标题)
 // -----------------------------------------------------------------------------
@@ -701,7 +765,11 @@ export async function processSingleArticle(
   let renderResult: RenderArticleResult | null = null;
 
   try {
-    const rawMd = fs.readFileSync(item.fullPath, 'utf-8');
+    const rawMd = applyContentCorrections(
+      fs.readFileSync(item.fullPath, 'utf-8'),
+      item.id,
+      pipelineCorrections.contentCorrections
+    );
     const baseDir = path.dirname(item.fullPath);
     const imgReport = verifyImagesIntegrity(rawMd, baseDir);
 
@@ -843,7 +911,7 @@ export async function processSingleArticle(
         recordVerifiedDraft(item.id, item.appmsgid, { verified: false, evidenceNotes: 'Full content update started; remains pending until independent reopen passes' }, { mode: 'full-content', outerTitle: finalOuterTitle });
       }
       console.log(`[wechat-batch] 调用 E 模块: 渲染正文与上传本地图片...`);
-      renderResult = await renderArticleContent(item.fullPath, { cacheRoot: statePaths.stateCacheDir });
+      renderResult = await renderArticleContent(item.fullPath, { cacheRoot: statePaths.stateCacheDir, markdownOverride: pipelineCorrections.correctedMarkdownById.get(item.id) });
       const applyRes = await applyArticleContent(editSession, renderResult, { expectedTitle: item.title });
       if (!applyRes.ok) {
         throw new Error(`E 模块正文或图片上传未完全就绪: ${applyRes.error || applyRes.details}`);
@@ -1237,6 +1305,15 @@ export async function runKeepaliveSession(): Promise<number> {
 // -----------------------------------------------------------------------------
 // 主编排执行入口
 // -----------------------------------------------------------------------------
+// 单次批处理运行内的私有内容修正上下文 (进程生命周期内共享，避免逐层传参)
+const pipelineCorrections: {
+  contentCorrections: LoadedContentCorrections;
+  correctedMarkdownById: Map<string, string>;
+} = {
+  contentCorrections: { map: {}, path: '' },
+  correctedMarkdownById: new Map<string, string>(),
+};
+
 export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs()): Promise<number> {
   console.log(`================================================================`);
   console.log(`[wechat-batch] 微信公众号草稿箱在原草稿更新与发布引擎 (Safe Spine + E 接线)`);
@@ -1269,6 +1346,19 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
       targetId: options.id,
       persist: !options.dryRun,
     });
+
+    // 加载私有内容修正映射 (源文件保持只读，仅对内存读取结果做逐字替换)
+    const contentCorrections = loadContentCorrections();
+    const correctedMarkdownById = new Map<string, string>();
+    for (const [articleId, rules] of Object.entries(contentCorrections.map)) {
+      const record = catalog.articles.find(a => a.id === articleId);
+      if (!record?.fullPath || !fs.existsSync(record.fullPath)) continue;
+      const raw = fs.readFileSync(record.fullPath, 'utf-8');
+      const corrected = applyContentCorrections(raw, articleId, contentCorrections);
+      if (corrected !== raw) correctedMarkdownById.set(articleId, corrected);
+    }
+    pipelineCorrections.contentCorrections = contentCorrections;
+    pipelineCorrections.correctedMarkdownById = correctedMarkdownById;
 
     console.log(`[wechat-batch] 状态库统计: 总计 ${catalog.totalScanned} 篇 | 活跃已确立: ${catalog.activeCount} 篇 | 待对齐: ${catalog.needsReconcileCount} 篇 | 缺图拦截: ${catalog.missingImageCount} 篇 | 未入库新篇: ${catalog.untrackedCount} 篇`);
 
@@ -1439,7 +1529,7 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
       if (options.verify) {
         console.log(`\n--- [DRY-RUN 在线论文真实性与 DOI/arXiv/链接核查] ---`);
         const reports = await Promise.all(
-          candidates.map(c => verifyArticleTruth(c.fullPath, { articleId: c.id }))
+          candidates.map(c => verifyArticleTruth(c.fullPath, { articleId: c.id, markdownOverride: correctedMarkdownById.get(c.id) }))
         );
         let verifyFail = 0;
         for (const r of reports) {
@@ -1470,7 +1560,7 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
       if (toVerify.length > 0) {
         console.log(`[wechat-batch] 正在执行前置推文真实性与 DOI/arXiv/链接核查 (${toVerify.length} 篇)...`);
         const reports = await Promise.all(
-          toVerify.map(c => verifyArticleTruth(c.fullPath, { articleId: c.id }))
+          toVerify.map(c => verifyArticleTruth(c.fullPath, { articleId: c.id, markdownOverride: correctedMarkdownById.get(c.id) }))
         );
         const reportMap = new Map(reports.map(r => [r.articleId!, r]));
         verifiedCandidates = candidates.filter(c => {

@@ -35,7 +35,7 @@ node bin/launch-publisher.mjs --check --search "GEM-15"
 node bin/launch-publisher.mjs --check --latest
 ```
 
-正式执行 `CREATE` 或 `CONTENT-UPDATE` 前，引擎也会默认自动并发运行该项核查；遇到 `doi.org` 404、DOI/arXiv 标题与推文声明不符、死链或残余占位符时默认拦截，绝不把未核实推文直接写入草稿箱。被拦截或遇到站方 403/无 DOI 告警时，Agent 应继续前往期刊/出版社/arXiv/Dryad **官方网站**二次核实：若官网证实 DOI/论文真实仅因新发尚未同步至 `doi.org`（或反爬 403），确认无误后可用 `--id <articleId> --skip-verify` 放行同步；若官网查出明确笔误且可据实修正，修正并复验通过后保存草稿；仅对官网查无此文、属假造或无法修正核实的文章保持拦截不入草稿箱。可用 `--strict-verify` 对警告也严格阻断。
+正式执行 `CREATE` 或 `CONTENT-UPDATE` 前，引擎也会默认自动并发运行该项核查；遇到 `doi.org` 404、DOI/arXiv 标题与推文声明不符、死链或残余占位符时默认拦截，绝不把未核实推文直接写入草稿箱。被拦截或遇到站方 403/无 DOI 告警时，Agent 应继续前往期刊/出版社/arXiv/Dryad **官方网站**二次核实：若官网证实 DOI/论文真实仅因新发尚未同步至 `doi.org`（或反爬 403），确认无误后可用 `--id <articleId> --skip-verify` 放行同步；若官网查出明确笔误（如 DOI 拼写误写），优先在私有 `content-corrections.json`（`{ articleId: [{ find, replaceWith, note }] }`）登记逐字修正——引擎在内存中改写后重新通过 `--verify` 再保存草稿，**源文件始终保持只读**，每次应用打印审计日志，坏 JSON fail-closed；仅对官网查无此文、属假造或无法修正核实的文章保持拦截不入草稿箱。可用 `--strict-verify` 对警告也严格阻断。
 
 预检比较当前 PC 可见的两个来源与私有状态库。它不写历史、基线或进程锁，也不连接浏览器。未连通的 Muse 远端可能还有未到达本机的文件，因此只报告 PC 当前索引。指定不存在的 `--id` 会报错退出码 1，不再当作“0任务”跳过。已确认的非普通长文（如图片轮播消息）会被记忆标记并在默认批量同步时自动保留跳过，不再每次浪费浏览器超时时间（显式 `--id` 仍可单独检测）。
 

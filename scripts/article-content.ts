@@ -68,6 +68,8 @@ export interface RenderArticleOptions {
   theme?: string;
   color?: string;
   citeStatus?: boolean;
+  /** 源文件保持只读时的内存内容修正版 (逐字替换后全文)，提供时优先于磁盘读取 */
+  markdownOverride?: string;
 }
 
 export interface RenderArticleResult {
@@ -697,7 +699,7 @@ export async function renderArticleContent(
   const color = options.color || '#0052ff';
   const citeStatus = options.citeStatus ?? true;
 
-  const rawMd = fs.readFileSync(resolvedSourcePath, 'utf-8');
+  const rawMd = options.markdownOverride ?? fs.readFileSync(resolvedSourcePath, 'utf-8');
   const sourceDir = path.dirname(resolvedSourcePath);
 
   // 执行安全预检、代码块隔离并规整相对路径为绝对路径

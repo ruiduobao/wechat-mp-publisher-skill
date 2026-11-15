@@ -23,7 +23,7 @@ node "C:/Users/Administrator/wechat-mp-publisher-skill/bin/launch-publisher.mjs"
 - 正式写入前（非 `--repair` 模式）引擎也会默认并发执行在线核查；发现 **404 假 DOI、DOI/arXiv 解析标题与推文声明严重不符、死链、0 字节损坏图片或占位符残留** 时直接阻断该篇同步。
 - **被拦截或告警后的官网二次核验与修复闭环**：被 `--verify` 拦截（如 `doi.org` 404）或告警（如站方 403 / 无 DOI）时，Agent 应进一步前往出版社/期刊/arXiv/Dryad 等**官方页面**直接核实：
   1. 若官网确认论文与 DOI 真实存在，仅因新发表尚未同步至 `doi.org`/Crossref 或遇到反爬 403，确认内容无误后可显式使用 `--id <articleId> --skip-verify` 放行入草稿箱；
-  2. 若官网核查出推文存在可修正的明确笔误（如 DOI 拼写、期号或链接误写，且具备修正授权），据实修正后重新通过 `--verify` 再保存草稿；
+  2. 若官网核查出推文存在可据实修正的明确笔误（如 DOI 拼写、期号或链接误写，且具备修正授权），据实修正后重新通过 `--verify` 再保存草稿；修正方式优先使用私有 `content-corrections.json` 映射（`{ articleId: [{ find, replaceWith, note }] }`，引擎在内存中逐字替换，**源文件保持只读**，每次应用均打印审计日志；坏 JSON fail-closed，路径可用 `WECHAT_CONTENT_CORRECTIONS_FILE` 注入）；
   3. 若官网查无此文、存在无法修正的伪造/张冠李戴或关键信息无法核实，坚决拦截，不保存到草稿箱。
 - `--strict-verify` 连警告也阻断，`--skip-verify` 仅在人工或官网二次核实确认无误后显式配合 `--id` 使用。
 
