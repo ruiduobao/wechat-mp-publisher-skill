@@ -603,7 +603,10 @@ export async function connectOrCreateHomeSession(): Promise<ConnectedHome> {
   await sleep(400);
   const targets = await cdp.send<{ targetInfos: Array<{ targetId: string; url: string; type: string }> }>('Target.getTargets');
 
-  let homeTarget = targets.targetInfos.find(t => t.type === 'page' && t.url.includes('/cgi-bin/home'));
+  // 冷启动可能同时恢复多个后台首页标签（含已失效的“请重新登录”页），
+  // 必须优先选择 URL 带 token= 的有效会话标签，避免误连到过期标签导致误报登录失效。
+  const homeCandidates = targets.targetInfos.filter(t => t.type === 'page' && t.url.includes('/cgi-bin/home'));
+  let homeTarget = homeCandidates.find(t => /[?&]token=\d+/.test(t.url)) || homeCandidates[0];
 
   if (!homeTarget) {
     const created = await cdp.send<{ targetId: string }>('Target.createTarget', { url: `${WECHAT_URL}cgi-bin/home?t=home/index` });
