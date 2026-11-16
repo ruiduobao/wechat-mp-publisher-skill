@@ -5,6 +5,9 @@
 任务先读取当前代码库 `SKILL.md` 和本说明，再执行只读预检与前置真实性核查：
 
 ```bash
+# 若使用 GitHub 私有仓库分发：先把最新本地版推文与配图增量拉到本地镜像
+node "C:/Users/Administrator/wechat-mp-publisher-skill/scripts/sync-from-github.mjs"
+
 node "C:/Users/Administrator/wechat-mp-publisher-skill/bin/launch-publisher.mjs" --check --verify
 ```
 

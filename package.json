@@ -12,6 +12,7 @@
     "launch": "node bin/launch-publisher.mjs",
     "batch": "node bin/launch-publisher.mjs",
     "sync": "bun run scripts/sync-wechat-drafts.ts",
+    "sync:github": "node scripts/sync-from-github.mjs",
     "keepalive": "node bin/launch-publisher.mjs --keepalive",
     "titles": "bun run scripts/set-titles.ts",
     "verify": "bun run scripts/verify-article.ts",

@@ -301,6 +301,15 @@ export function calculateFingerprint(markdown: string, baseDir: string): Content
   const contentHash = crypto.createHash('sha256').update(markdown, 'utf-8').digest('hex');
   const report = verifyImagesIntegrity(markdown, baseDir);
 
+  // 可选：把镜像源路径前缀归一化为历史源路径前缀后再参与哈希，
+  // 使同一批内容从不同挂载目录读取时保持指纹一致（默认关闭，不影响现有来源）。
+  const fpFrom = process.env.WECHAT_FP_PATH_FROM;
+  const fpTo = process.env.WECHAT_FP_PATH_TO;
+  const normalizeFpPath = (p: string): string => {
+    if (!fpFrom || fpTo === undefined) return p;
+    return p.startsWith(fpFrom) ? fpTo + p.slice(fpFrom.length) : p;
+  };
+
   const imgHasher = crypto.createHash('sha256');
   for (const img of report.images) {
     if (img.exists && img.size > 0 && img.stable) {
@@ -308,12 +317,12 @@ export function calculateFingerprint(markdown: string, baseDir: string): Content
         const buf = fs.readFileSync(img.path);
         const fHash = crypto.createHash('sha256').update(buf).digest('hex');
         img.sha256 = fHash;
-        imgHasher.update(`${img.path}:${img.size}:${fHash}`);
+        imgHasher.update(`${normalizeFpPath(img.path)}:${img.size}:${fHash}`);
       } catch (readErr: any) {
         throw new Error(`读取图片字节计算指纹失败: ${img.path} (${readErr?.message})`);
       }
     } else {
-      imgHasher.update(`${img.path}:unstable_or_missing`);
+      imgHasher.update(`${normalizeFpPath(img.path)}:unstable_or_missing`);
     }
   }
   const imageHash = imgHasher.digest('hex');

@@ -86,6 +86,7 @@ node bin/launch-publisher.mjs --keepalive
 - 普通长文正文必须是可见可编辑的 `.rich_media_content .ProseMirror`。标题/摘要可能也有 ProseMirror，图片轮播消息还会保留隐藏长文镜像；“从这里开始写正文”不代表真实空稿。遇到 `unsupported-message-type` 保留原稿并持久化标记，后续全量同步自动跳过不再浪费超时时间（显式 `--id` 仍可单独检测），不改 CSS 或隐藏类型。
 - 复用宝玉 browser 路线专用 Profile 和主页，按 Profile 查端口，使用实际 WebSocket。若专用 Profile 尚未运行，统一引擎会以独立脱管进程安全拉起专用实例并保持常驻（不杀其它普通 Edge）。仅关闭本任务标签，不关闭用户标签、不反复开窗或弹二维码图片。公众号登录过期报告 `needs-attention`，与模型服务鉴权分开报告。
 - Muse 来源 `F:\同步文件夹\公众号\每日推文` 与本地独立来源 `Z:\自媒体\公众号\每日推文` 保持分离且发布只读。缓存、状态、封面、模板、日志与截图留在私有目录。
+- **GitHub 同步通道（可选）**：当远端经私有仓库（如 `ruiduobao/zimeiti-sync`）分发时，先执行 `node scripts/sync-from-github.mjs`（或 `bun run sync:github`）把 `*_本地版.md` 与 `images/**` 增量拉到本地镜像目录，再把 `WECHAT_MUSE_ROOT` 指向该镜像。脚本读取仓库根私有 `.env` 中的 `GITHUB_SYNC_TOKEN/REPO/DEST`，以 blob sha 做增量与删除同步；跳过体积巨大的 `_网页版.html` 与原始大 Markdown。镜像与历史源路径不同时，用 `WECHAT_FP_PATH_FROM`/`WECHAT_FP_PATH_TO` 归一化图片指纹路径，避免误判整批内容变更。
 - 完整正文通过原生 HTML 复制粘贴交给微信编辑器，复制页仅包含本次内容，复制后关闭；这会覆盖系统剪贴板，不读取原剪贴板。粘贴后轮询等待整篇规范化文本真正变为新内容，防止读取旧正文快照误判丢占位符。
 - 逐图通过原生选区（带抖动短重试）替换唯一文字占位符，核对全篇文本精确差值并上传。残留占位符或选区不稳时停止，不直接改 `textContent` 或 `innerHTML` 假装修复。
 - **零缩进与零空行铁律**：渲染预处理自动剥离非代码块正文段落与列表行首多余缩进（空格/Tab/全角 `\u3000`/`&nbsp;`）、归零 `<p>`/`<ul>`/`<ol>`/`<li>` 的左右 `margin`/`padding`/`text-indent`（避免相对 H1 莫名右缩进），展开外层 `section.container` 并清除标签间空白节点；上传图片及插入名片后，通过原生 `Backspace`/`Delete` 按键清除正文内部、H1 后、图片前后及名片前的所有残余空段落。

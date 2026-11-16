@@ -21,6 +21,15 @@ Node.js 负责统一启动器，Bun 负责 TypeScript 运行时。正式写入�
 
 每次有待同步的新文件或内容更新时，**第一件事必须核查推文本身是否有问题**：论文是否真实存在、DOI 能否解析及标题是否一致、arXiv/GitHub/项目链接是否有效、本地图片是否完整无损。
 
+若推文经 **GitHub 私有仓库**（如 `ruiduobao/zimeiti-sync`）分发，先增量拉取到本地镜像，再做预检：
+
+```bash
+# 读取私有 .env 的 GITHUB_SYNC_TOKEN/REPO/DEST，只拉 *_本地版.md 与 images/**
+node "C:/Users/Administrator/wechat-mp-publisher-skill/scripts/sync-from-github.mjs"
+```
+
+镜像目录通过 `WECHAT_MUSE_ROOT` 接入；与历史源路径不同时，用 `WECHAT_FP_PATH_FROM`/`WECHAT_FP_PATH_TO` 归一化图片指纹路径，避免整批误判为内容变更。
+
 ```bash
 # 1. 在线核查全部待处理文章（或用 --latest 1 / --id <articleId> / --search "<关键词>"）
 bun run verify
