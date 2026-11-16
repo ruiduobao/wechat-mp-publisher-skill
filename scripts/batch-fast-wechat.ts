@@ -624,7 +624,14 @@ export async function connectOrCreateHomeSession(): Promise<ConnectedHome> {
   let isMenuReady = await waitForSelector(homeSession, '.new-creation__menu', 10_000);
   if (!isMenuReady) {
     const currentUrl = await evaluatePage<string>(homeSession, 'window.location.href');
-    if (!currentUrl.includes('/cgi-bin/home')) {
+    const hasToken = /[?&]token=\d+/.test(currentUrl);
+    if (!hasToken) {
+      // 冷启动恢复的旧标签可能停留在“请重新登录”壳页面（URL 仍含 /cgi-bin/home 但无 token）。
+      // 直接访问站点根路径会由服务端 302 到带 token 的后台首页，从而拿到有效会话。
+      console.log(`[wechat-batch] 首页缺少 token，导航至站点根路径以获取有效会话...`);
+      await evaluatePage(homeSession, `window.location.href = '${WECHAT_URL}'`);
+      await sleep(4000);
+    } else if (!currentUrl.includes('/cgi-bin/home')) {
       console.log(`[wechat-batch] 导航至公众号后台首页...`);
       await evaluatePage(homeSession, `window.location.href = '${WECHAT_URL}cgi-bin/home?t=home/index'`);
       await sleep(1500);

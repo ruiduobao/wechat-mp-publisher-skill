@@ -671,6 +671,10 @@ export function sanitizeWechatHtml(rawHtml: string): string {
     .replace(/(<(?:section|div|ul|ol|blockquote)(?:\s+[^>]*)?>)\s+(?=<)/gi, '$1')
     .replace(/\s+(<\/(?:section|div|ul|ol|blockquote)>)/gi, '$1');
 
+  // 5. 清除图片占位符与其后图注/内联标签之间的空白：
+  //    占位符被替换为 <img> 后，紧随的空格会变成图注段首缩进（ProseMirror 会固化成 &nbsp;）
+  html = html.replace(/(WECHATIMGPH_\d+)[\s\u00A0\u3000]+(?=<)/g, '$1');
+
   return html.replace(/\u0000PREBLOCK_(\d+)\u0000/g, (_m, idx) => preBlocks[Number(idx)] ?? '');
 }
 
