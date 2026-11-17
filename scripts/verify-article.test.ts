@@ -40,6 +40,21 @@ test('extractArticleClaims 准确提取 DOI、arXiv、论文标题并剔除尾�
   expect(claims.urls).toEqual(['https://github.com/example/uniflow-rs']);
 });
 
+test('extractArticleClaims 剥离链接后紧跟的全角括号注释，避免假 404', () => {
+  const md = `# 测试标题
+
+- **标题：** Re:Earth Visualizer 开源平台
+
+代码地址：https://github.com/reearth/reearth-visualizer（Apache-2.0 许可），
+另见 https://reearth.io/product/visualizer（产品页）。
+`;
+  const claims = extractArticleClaims(md);
+  expect(claims.urls).toEqual([
+    'https://github.com/reearth/reearth-visualizer',
+    'https://reearth.io/product/visualizer',
+  ]);
+});
+
 test('computeTitleSimilarity 区分真实同论文与张冠李戴标题', () => {
   expect(computeTitleSimilarity(
     'High-resolution mapping reveals trade-offs among tea production',

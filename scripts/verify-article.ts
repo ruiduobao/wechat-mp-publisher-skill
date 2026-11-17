@@ -109,8 +109,10 @@ export function extractArticleClaims(markdown: string, filePath = 'article.md'):
   }
 
   // 提取非图片、非 doi.org、非 arxiv.org 重复的原文参考链接
+  // 注意：中文正文常在链接后紧跟全角括号注释（如 https://github.com/x/y（Apache-2.0）），
+  // 全角开括号必须与闭括号一样作为 URL 终止符，否则会把注释并入 URL 造成假 404。
   const urlSet = new Set<string>();
-  const urlRegex = /https?:\/\/[^\s<>()[\]"'`，。；：！？）】」』]+/gi;
+  const urlRegex = /https?:\/\/[^\s<>()[\]"'`，。；：！？（）【】「」『』〈〉《》]+/gi;
   while ((m = urlRegex.exec(withoutCode)) !== null) {
     const u = cleanTrailingPunctuation(m[0]!);
     try {
