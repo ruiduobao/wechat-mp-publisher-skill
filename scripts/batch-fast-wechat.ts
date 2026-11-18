@@ -649,6 +649,21 @@ export async function connectOrCreateHomeSession(): Promise<ConnectedHome> {
   }
   const token = tokenMatch[1]!;
 
+  // 会话真实性守卫：首页可能只是缓存渲染（菜单存在、token 仍在 URL 中），
+  // 但后台接口实际已返回“登录超时”。以是否存在 slave_sid 会话 Cookie 作为硬判据，
+  // 避免误报“会话就绪”后逐篇空转 30 秒。
+  const cookieSnapshot = await cdp.send<{ cookies?: Array<{ name: string; domain: string; session: boolean; expires: number }> }>(
+    'Storage.getCookies'
+  ).catch(() => null);
+  const wechatCookies = (cookieSnapshot?.cookies || []).filter(c => c.domain.includes('weixin.qq.com'));
+  const hasSessionCookie = wechatCookies.some(c => c.name === 'slave_sid');
+  if (cookieSnapshot && !hasSessionCookie) {
+    throw new Error(
+      `[wechat-batch] 公众号登录态已失效 (缺少 slave_sid 会话 Cookie，当前仅有 ${wechatCookies.length} 条 weixin Cookie)，` +
+      `请在专用浏览器扫码续期后重试 (needs-attention)`
+    );
+  }
+
   return { cdp, homeSession, token };
 }
 
