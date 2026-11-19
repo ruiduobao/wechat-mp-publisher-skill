@@ -137,7 +137,9 @@ node bin/launch-publisher.mjs --repair --id <articleId>                    # 仅
 node bin/launch-publisher.mjs --refresh-content --id <articleId>           # 在原草稿上按源文重建完整正文与图片
 node bin/launch-publisher.mjs --titles "<path/to/titles-override.json>"    # 批量同步就绪文章
 
-# 轻量登录态保活（每天执行一次，静默刷新后台首页顺延 96 小时滑动 Cookie，不改写草稿）
+# 轻量登录态探测（按需执行；仅尝试正常访问官方后台首页并检测当前登录态是否可用）
+# 平台负责会话期限，保活不保证延期天数/月数；检测到明确登录页时请人工扫码续期。不改写草稿。
+# 输出 keepalive-status=healthy|needs-qr|unknown，退出码 0/3/4；unknown 仅表示未确认，不应据此提示扫码。
 bun run keepalive
 node bin/launch-publisher.mjs --keepalive
 

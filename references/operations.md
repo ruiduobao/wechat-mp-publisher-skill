@@ -125,13 +125,15 @@ node bin/launch-publisher.mjs --titles "C:/private/titles-override.json"
 
 登录失效时报告需要续期；模型服务商拒绝子 agent 请求与公众号登录失败是两件不同的事。
 
-微信公众号后台为 `slave_sid` 等核心认证 Cookie 下发的默认有效期为 **96 小时（4 天）滑动过期**，且 `uuid` 为会话级 Cookie。若连续超过 4 天没有新推文写入草稿箱（`--check` 只读模式不会触碰浏览器），建议保持专用 Edge 窗口常驻，并每天执行一次轻量保活命令（仅静默请求后台首页刷新滑动 Cookie，不扫描、不建稿、不改稿）：
+微信公众号后台的会话期限由平台控制，本项目无法保证保活能顺延固定小时数、天数或月数。`--keepalive` 路径不读取 Cookie；只有普通发布路径的会话守卫会通过 CDP 读取 Cookie 的名称/域等元数据来确认 `slave_sid` 是否存在，且不记录、不导出、不打印任何 Cookie 值。`--keepalive` 只在需要时尝试一次正常的官方后台首页访问并检测当前登录态是否可用（不扫描、不建稿、不改稿）：
 
 ```bash
 bun run keepalive
 # 或
 node bin/launch-publisher.mjs --keepalive
 ```
+
+判定输出固定为 `keepalive-status=healthy|needs-qr|unknown`，分别对应退出码 0/3/4：healthy 要求 HTTP 2xx、最终 URL 含 token 且页面含后台新建菜单；只有明确登录页才判定 needs-qr 并建议人工扫码续期；网络/CDP 故障、5xx/429 或无法识别的 200 页面均判定 unknown。unknown 仅表示未能确认当前状态，不代表登录失效，也不要据此提示扫码。建议按需运行；扫码续期始终由人工完成。
 
 ## 6. 保存与独立验收
 

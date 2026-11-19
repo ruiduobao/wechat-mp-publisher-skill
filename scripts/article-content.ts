@@ -1353,7 +1353,8 @@ export async function cleanupEmptyParagraphsNatively(session: EditorSession, max
       if (!editor) return { found: false, useDelete: false, beforeCount: 0 };
       const card = editor.querySelector('mp-common-profile');
       const empties = Array.from(editor.querySelectorAll('p, div')).filter(el => {
-        if (el === editor || el.closest('mp-common-profile, pre, code, blockquote')) return false;
+        if (el === editor || el.closest('mp-common-profile, pre, code')) return false;
+        if (el.closest('blockquote') && el !== el.closest('blockquote')) return false;
         if (el.querySelector('img:not(.ProseMirror-separator), mp-common-profile, svg, video, iframe, table, hr, pre')) return false;
         const text = (el.textContent || '').replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
         if (text.length > 0) return false;
@@ -1397,7 +1398,7 @@ export async function cleanupEmptyParagraphsNatively(session: EditorSession, max
       if (!editor) return 0;
       const card = editor.querySelector('mp-common-profile');
       return Array.from(editor.querySelectorAll('p, div')).filter(el => {
-        if (el === editor || el.closest('mp-common-profile, pre, code, blockquote')) return false;
+        if (el === editor || el.closest('mp-common-profile, pre, code')) return false;
         if (el.querySelector('img:not(.ProseMirror-separator), mp-common-profile, svg, video, iframe, table, hr, pre')) return false;
         const text = (el.textContent || '').replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
         if (text.length > 0) return false;
@@ -1423,7 +1424,7 @@ export async function cleanupEmptyParagraphsNatively(session: EditorSession, max
       if (!editor) return 0;
       const card = editor.querySelector('mp-common-profile');
       return Array.from(editor.querySelectorAll('p, div')).filter(el => {
-        if (el === editor || el.closest('mp-common-profile, pre, code, blockquote')) return false;
+        if (el === editor || el.closest('mp-common-profile, pre, code')) return false;
         if (el.querySelector('img:not(.ProseMirror-separator), mp-common-profile, svg, video, iframe, table, hr, pre')) return false;
         const text = (el.textContent || '').replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
         if (text.length > 0) return false;
@@ -1434,6 +1435,47 @@ export async function cleanupEmptyParagraphsNatively(session: EditorSession, max
 
     if (retryCount < targetInfo.beforeCount) {
       removed += (targetInfo.beforeCount - retryCount);
+      continue;
+    }
+
+    // 表格/不可编辑 section 后偶尔残留“按不动”的 ProseMirror 空段。
+    // 原生删除键已失败两次后，最后用编辑器自身的 execCommand('delete') 走模型删除，
+    // 绝不直接 remove()/改 innerHTML 冒充成功。
+    const fallbackCount = await evaluatePage<number>(session, `(() => {
+      const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+      if (!editor) return 0;
+      const card = editor.querySelector('mp-common-profile');
+      const empties = Array.from(editor.querySelectorAll('p, div')).filter(el => {
+        if (el === editor || el.closest('mp-common-profile, pre, code')) return false;
+        if (el.closest('blockquote') && el !== el.closest('blockquote')) return false;
+        if (el.querySelector('img:not(.ProseMirror-separator), mp-common-profile, svg, video, iframe, table, hr, pre')) return false;
+        const text = (el.textContent || '').replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
+        if (text.length > 0) return false;
+        if (card && (card.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) return false;
+        return true;
+      });
+      const target = empties[${skipIndex}];
+      if (!target) return 0;
+      editor.focus();
+      const range = document.createRange();
+      range.selectNode(target);
+      const selection = getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      if (!document.execCommand('delete')) return 0;
+      return Array.from(editor.querySelectorAll('p, div')).filter(el => {
+        if (el === editor || el.closest('mp-common-profile, pre, code')) return false;
+        if (el.closest('blockquote') && el !== el.closest('blockquote')) return false;
+        if (el.querySelector('img:not(.ProseMirror-separator), mp-common-profile, svg, video, iframe, table, hr, pre')) return false;
+        const text = (el.textContent || '').replace(/[\\s\\u00A0\\u3000\\u200B-\\u200D\\uFEFF]/g, '');
+        if (text.length > 0) return false;
+        if (card && (card.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) return false;
+        return true;
+      }).length;
+    })()`).catch(() => targetInfo.beforeCount);
+
+    if (fallbackCount < targetInfo.beforeCount) {
+      removed += (targetInfo.beforeCount - fallbackCount);
     } else {
       skipIndex++;
     }

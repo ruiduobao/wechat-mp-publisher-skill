@@ -100,7 +100,7 @@ export function printHelpAndExit(): never {
 
 选项:
   --dry-run                 纯读演练模式 (不获取锁、不修改磁盘、不触碰浏览器)
-  --keepalive               轻量续期公众号登录态 (仅静默刷新后台首页顺延 Cookie，不扫描或改写草稿)
+  --keepalive               轻量登录态探测 (单独使用；仅访问官方后台首页检测当前登录态，不扫描/不改写草稿，不保证续期时长)
   --verify                  配合 --check 运行在线论文真实性与 DOI/arXiv/链接核查
   --skip-verify             显式跳过正式写入前的在线 DOI/arXiv 真实性门禁
   --strict-verify           严格核查模式 (遇到警告如无DOI/链接403也阻断发布)
@@ -122,6 +122,10 @@ export function printHelpAndExit(): never {
 
 export function parseBatchArgs(): BatchCliOptions {
   const args = process.argv.slice(2);
+  // 帮助优先：--help/-h 出现在任意位置都直接输出帮助并退出 0，不先被业务参数值/缺值分支拦截。
+  if (args.some(a => a === '--help' || a === '-h')) {
+    printHelpAndExit();
+  }
   let dryRun = false;
   let keepalive = false;
   let verify = false;
@@ -139,12 +143,13 @@ export function parseBatchArgs(): BatchCliOptions {
   let titleOverride: string | undefined;
   let titlesFile: string | undefined;
   let titleMap: Record<string, string> | undefined;
+  let businessArgSeen = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === '--help' || a === '-h') {
-      printHelpAndExit();
-    } else if (a === '--dry-run') {
+    // 只把开关本身计入业务参数；带值参数的值由对应分支消费，不当作独立开关。
+    if (a.startsWith('-') && a !== '--keepalive') businessArgSeen = true;
+    if (a === '--dry-run') {
       dryRun = true;
     } else if (a === '--keepalive') {
       keepalive = true;
@@ -248,9 +253,9 @@ export function parseBatchArgs(): BatchCliOptions {
     }
   }
 
-  // 严格门禁：--keepalive 不能与 --dry-run 同时使用
-  if (keepalive && dryRun) {
-    console.error('❌ 参数错误: --keepalive 不能与 --dry-run / --check 同时使用');
+  // 严格门禁：--keepalive 只能单独使用（--help 已在解析时提前退出）
+  if (keepalive && businessArgSeen) {
+    console.error('❌ 参数错误: --keepalive 必须单独使用（仅可与 --help 配合），不能与其它业务参数组合');
     process.exit(2);
   }
 
@@ -556,7 +561,30 @@ export async function findEdgeDebugPort(targetProfileDir: string): Promise<numbe
   return null;
 }
 
-export async function connectOrCreateHomeSession(): Promise<ConnectedHome> {
+/**
+ * 只接受真正位于官方后台首页的标签：https、无自定义端口、host 精确为
+ * mp.weixin.qq.com、pathname 为 /cgi-bin/home（允许结尾斜杠）。
+ * 拒绝同路径的非官方 host、子域、http 与带端口 URL。
+ */
+export function isOfficialHomeTargetUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'https:' || url.hostname !== 'mp.weixin.qq.com' || url.port !== '') return false;
+    return url.pathname === '/cgi-bin/home' || url.pathname === '/cgi-bin/home/';
+  } catch {
+    return false;
+  }
+}
+
+export interface HomeSessionOptions {
+  /** 保活路径必须为 false：不读取 Storage.getCookies，也不导出任何 Cookie 元数据。 */
+  checkSessionCookie?: boolean;
+  /** 保活路径允许未就绪首页返回，由后续三态探测判定，避免把加载超时误报为登录失效。 */
+  requireReadyHome?: boolean;
+}
+
+export async function connectOrCreateHomeSession(options: HomeSessionOptions = {}): Promise<ConnectedHome> {
+  const { checkSessionCookie = true, requireReadyHome = true } = options;
   const profileDir = getDefaultProfileDir();
   let cdp: CdpConnection;
 
@@ -600,71 +628,88 @@ export async function connectOrCreateHomeSession(): Promise<ConnectedHome> {
     console.log(`[wechat-batch] ✅ 已独立拉起并连接专用浏览器调试端口: ${freePort}`);
   }
 
-  await sleep(400);
-  const targets = await cdp.send<{ targetInfos: Array<{ targetId: string; url: string; type: string }> }>('Target.getTargets');
+  // CDP 连接成功后任何 Target/attach/evaluate 失败都必须关闭连接再抛出，
+  // 避免保活或发布路径在 runKeepaliveSession 之外泄漏 WebSocket 资源。
+  try {
+    await sleep(400);
+    const targets = await cdp.send<{ targetInfos: Array<{ targetId: string; url: string; type: string }> }>('Target.getTargets');
 
-  // 冷启动可能同时恢复多个后台首页标签（含已失效的“请重新登录”页），
-  // 必须优先选择 URL 带 token= 的有效会话标签，避免误连到过期标签导致误报登录失效。
-  const homeCandidates = targets.targetInfos.filter(t => t.type === 'page' && t.url.includes('/cgi-bin/home'));
-  let homeTarget = homeCandidates.find(t => /[?&]token=\d+/.test(t.url)) || homeCandidates[0];
+    // 冷启动可能同时恢复多个后台首页标签（含已失效的“请重新登录”页），
+    // 仅选择官方 host + /cgi-bin/home path 的 page；优先带 token= 的有效会话标签。
+    const homeCandidates = targets.targetInfos.filter(t => t.type === 'page' && isOfficialHomeTargetUrl(t.url));
+    let homeTarget = homeCandidates.find(t => /[?&]token=\d+/.test(t.url)) || homeCandidates[0];
 
-  if (!homeTarget) {
-    const created = await cdp.send<{ targetId: string }>('Target.createTarget', { url: `${WECHAT_URL}cgi-bin/home?t=home/index` });
-    homeTarget = { targetId: created.targetId, url: WECHAT_URL, type: 'page' };
-    await sleep(1500);
-  }
-
-  const { sessionId: homeSid } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: homeTarget.targetId, flatten: true });
-  const homeSession: EditorSession = { cdp, sessionId: homeSid, targetId: homeTarget.targetId };
-
-  await cdp.send('Page.enable', {}, { sessionId: homeSid }).catch(() => {});
-  await cdp.send('Runtime.enable', {}, { sessionId: homeSid }).catch(() => {});
-
-  // 等待首页完成重定向和加载 (避免刚冷启动 Edge 时中途打断 /cgi-bin/home 302 跳转)
-  let isMenuReady = await waitForSelector(homeSession, '.new-creation__menu', 10_000);
-  if (!isMenuReady) {
-    const currentUrl = await evaluatePage<string>(homeSession, 'window.location.href');
-    const hasToken = /[?&]token=\d+/.test(currentUrl);
-    if (!hasToken) {
-      // 冷启动恢复的旧标签可能停留在“请重新登录”壳页面（URL 仍含 /cgi-bin/home 但无 token）。
-      // 直接访问站点根路径会由服务端 302 到带 token 的后台首页，从而拿到有效会话。
-      console.log(`[wechat-batch] 首页缺少 token，导航至站点根路径以获取有效会话...`);
-      await evaluatePage(homeSession, `window.location.href = '${WECHAT_URL}'`);
-      await sleep(4000);
-    } else if (!currentUrl.includes('/cgi-bin/home')) {
-      console.log(`[wechat-batch] 导航至公众号后台首页...`);
-      await evaluatePage(homeSession, `window.location.href = '${WECHAT_URL}cgi-bin/home?t=home/index'`);
+    if (!homeTarget) {
+      const created = await cdp.send<{ targetId: string }>('Target.createTarget', { url: `${WECHAT_URL}cgi-bin/home?t=home/index` });
+      homeTarget = { targetId: created.targetId, url: WECHAT_URL, type: 'page' };
       await sleep(1500);
     }
-    isMenuReady = await waitForSelector(homeSession, '.new-creation__menu', 18_000);
-  }
-  if (!isMenuReady) {
-    throw new Error('[wechat-batch] 公众号后台登录态已失效或首页加载超时，请在专用浏览器扫码续期后重试 (needs-attention)');
-  }
 
-  const homeFinalUrl = await evaluatePage<string>(homeSession, 'window.location.href');
-  const tokenMatch = homeFinalUrl.match(/token=(\d+)/);
-  if (!tokenMatch) {
-    throw new Error('[wechat-batch] 无法从后台首页 URL 中解析出有效 token');
-  }
-  const token = tokenMatch[1]!;
+    const { sessionId: homeSid } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId: homeTarget.targetId, flatten: true });
+    const homeSession: EditorSession = { cdp, sessionId: homeSid, targetId: homeTarget.targetId };
 
-  // 会话真实性守卫：首页可能只是缓存渲染（菜单存在、token 仍在 URL 中），
-  // 但后台接口实际已返回“登录超时”。以是否存在 slave_sid 会话 Cookie 作为硬判据，
-  // 避免误报“会话就绪”后逐篇空转 30 秒。
-  const cookieSnapshot = await cdp.send<{ cookies?: Array<{ name: string; domain: string; session: boolean; expires: number }> }>(
-    'Storage.getCookies'
-  ).catch(() => null);
-  const wechatCookies = (cookieSnapshot?.cookies || []).filter(c => c.domain.includes('weixin.qq.com'));
-  const hasSessionCookie = wechatCookies.some(c => c.name === 'slave_sid');
-  if (cookieSnapshot && !hasSessionCookie) {
-    throw new Error(
-      `[wechat-batch] 公众号登录态已失效 (缺少 slave_sid 会话 Cookie，当前仅有 ${wechatCookies.length} 条 weixin Cookie)，` +
-      `请在专用浏览器扫码续期后重试 (needs-attention)`
-    );
-  }
+    await cdp.send('Page.enable', {}, { sessionId: homeSid }).catch(() => {});
+    await cdp.send('Runtime.enable', {}, { sessionId: homeSid }).catch(() => {});
 
-  return { cdp, homeSession, token };
+    // 等待首页完成重定向和加载 (避免刚冷启动 Edge 时中途打断 /cgi-bin/home 302 跳转)
+    if (requireReadyHome) {
+      let isMenuReady = await waitForSelector(homeSession, '.new-creation__menu', 10_000);
+      if (!isMenuReady) {
+        const currentUrl = await evaluatePage<string>(homeSession, 'window.location.href');
+        const hasToken = /[?&]token=\d+/.test(currentUrl);
+        if (!hasToken) {
+          // 冷启动恢复的旧标签可能停留在“请重新登录”壳页面（URL 仍含 /cgi-bin/home 但无 token）。
+          // 直接访问站点根路径会由服务端 302 到带 token 的后台首页，从而拿到有效会话。
+          console.log(`[wechat-batch] 首页缺少 token，导航至站点根路径以获取有效会话...`);
+          await evaluatePage(homeSession, `window.location.href = '${WECHAT_URL}'`);
+          await sleep(4000);
+        } else if (!currentUrl.includes('/cgi-bin/home')) {
+          console.log(`[wechat-batch] 导航至公众号后台首页...`);
+          await evaluatePage(homeSession, `window.location.href = '${WECHAT_URL}cgi-bin/home?t=home/index'`);
+          await sleep(1500);
+        }
+        isMenuReady = await waitForSelector(homeSession, '.new-creation__menu', 18_000);
+      }
+      if (!isMenuReady) {
+        throw new Error('[wechat-batch] 公众号后台登录态已失效或首页加载超时，请在专用浏览器扫码续期后重试 (needs-attention)');
+      }
+    }
+
+    // 只有发布路径（requireReadyHome）才解析 token；保活探针只需一个合法的
+    // ConnectedHome 结构，返回空 token 即可，绝不在页面里执行 URL/token 读取。
+    let token = '';
+    if (requireReadyHome) {
+      const homeFinalUrl = await evaluatePage<string>(homeSession, 'window.location.href');
+      const tokenMatch = homeFinalUrl.match(/token=(\d+)/);
+      token = tokenMatch?.[1] || '';
+      if (!token) {
+        throw new Error('[wechat-batch] 无法从后台首页 URL 中解析出有效 token');
+      }
+    }
+
+    // 会话真实性守卫（仅普通发布路径）：首页可能只是缓存渲染（菜单存在、token 仍在 URL 中），
+    // 但后台接口实际已返回“登录超时”。以是否存在 slave_sid 会话 Cookie 作为硬判据，
+    // 避免误报“会话就绪”后逐篇空转 30 秒。保活路径明确跳过本段，绝不读取 Cookie。
+    // 本段只读取 Cookie 的名称/域等元数据，不记录、不导出任何 Cookie 值。
+    if (checkSessionCookie) {
+      const cookieSnapshot = await cdp.send<{ cookies?: Array<{ name: string; domain: string; session: boolean; expires: number }> }>(
+        'Storage.getCookies'
+      ).catch(() => null);
+      const wechatCookies = (cookieSnapshot?.cookies || []).filter(c => c.domain.includes('weixin.qq.com'));
+      const hasSessionCookie = wechatCookies.some(c => c.name === 'slave_sid');
+      if (cookieSnapshot && !hasSessionCookie) {
+        throw new Error(
+          `[wechat-batch] 公众号登录态已失效 (缺少 slave_sid 会话 Cookie，当前仅有 ${wechatCookies.length} 条 weixin Cookie)，` +
+          `请在专用浏览器扫码续期后重试 (needs-attention)`
+        );
+      }
+    }
+
+    return { cdp, homeSession, token };
+  } catch (err) {
+    try { cdp.close(); } catch {}
+    throw err;
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -1267,63 +1312,205 @@ export async function processSingleArticle(
   }
 }
 
-async function getWechatAuthCookieExpiry(cdp: CdpConnection): Promise<{ name: string; expiresIso: string; remainingHours: number } | null> {
+export type KeepaliveStatus = 'healthy' | 'needs-qr' | 'unknown';
+
+export interface KeepaliveObservation {
+  httpStatus?: number;
+  /** 最终官方 origin + pathname，不含 query/token。 */
+  finalUrl?: string;
+  /** 仅用于纯函数测试兼容输入；生产探针绝不返回 HTML。 */
+  html?: string;
+  hasToken?: boolean;
+  hasHomeMenu?: boolean;
+  hasLoginFrame?: boolean;
+  /** 受保护的官方后台入口明确返回认证拒绝（如“登录超时/请重新登录”）。 */
+  hasAuthRejected?: boolean;
+  error?: string;
+}
+
+export interface KeepaliveClassification {
+  status: KeepaliveStatus;
+  reason: string;
+}
+
+export const KEEPALIVE_EXIT_CODES: Record<KeepaliveStatus, number> = {
+  healthy: 0,
+  'needs-qr': 3,
+  unknown: 4,
+};
+
+/**
+ * 三态判定（纯函数）。观测对象仅携带同一次 fetch 的状态、脱敏最终路径和页面标记布尔值，
+ * 不把响应 HTML、query 或 token 值返回 Node：
+ * - healthy: HTTP 2xx + 官方 HTTPS 后台首页 path + token 存在 + 后台菜单标记；
+ * - needs-qr: HTTP 2xx + 明确 loginpage path 优先，或后台页缺少 home marker 且存在 login_frame；
+ * - unknown: 网络/CDP 错误、非整数/非 2xx、非官方 URL、未知/维护页面。
+ * 不读取 Cookie expiry，也不要求任何有效期变化。
+ */
+export function classifyKeepaliveObservation(observation: KeepaliveObservation): KeepaliveClassification {
+  const { httpStatus, finalUrl, html, hasToken: observedHasToken, hasHomeMenu: observedHomeMenu, hasLoginFrame: observedLoginFrame, hasAuthRejected: observedAuthRejected, error } = observation;
+  if (error) return { status: 'unknown', reason: 'network-or-cdp-error' };
+  if (
+    typeof httpStatus !== 'number' || !Number.isInteger(httpStatus) || !Number.isFinite(httpStatus) ||
+    typeof finalUrl !== 'string' || finalUrl === ''
+  ) {
+    return { status: 'unknown', reason: 'incomplete-observation' };
+  }
+  // Legacy/fake observations may provide HTML; production probes provide only booleans.
+  const hasHomeMenu = typeof observedHomeMenu === 'boolean' ? observedHomeMenu : typeof html === 'string' && html.includes('new-creation__menu');
+  const hasLoginFrame = typeof observedLoginFrame === 'boolean' ? observedLoginFrame : typeof html === 'string' && /\bid\s*=\s*(?:"login_frame"|'login_frame'|login_frame)(?=[\s>])/i.test(html);
+  const hasTokenFromUrl = typeof observedHasToken === 'boolean' ? observedHasToken : undefined;
+  const hasAuthRejected = typeof observedAuthRejected === 'boolean'
+    ? observedAuthRejected
+    : typeof html === 'string' && /登录超时/.test(html);
+  if (httpStatus === 429) return { status: 'unknown', reason: 'http-429' };
+  if (httpStatus < 200 || httpStatus >= 300) return { status: 'unknown', reason: `http-${httpStatus}` };
+
+  let final: URL;
   try {
-    const res = await cdp.send<{ cookies?: Array<{ name: string; domain: string; session: boolean; expires: number }> }>('Storage.getCookies');
-    const target = (res.cookies || []).find(
-      c => c.domain.includes('weixin.qq.com') && !c.session && (c.name === 'slave_sid' || c.name === 'data_ticket') && c.expires > 0
-    );
-    if (!target) return null;
-    const expiresMs = target.expires * 1000;
-    const remainingHours = Math.max(0, (expiresMs - Date.now()) / 3_600_000);
-    return {
-      name: target.name,
-      expiresIso: new Date(expiresMs).toISOString(),
-      remainingHours: Number(remainingHours.toFixed(1)),
-    };
+    final = new URL(finalUrl);
   } catch {
-    return null;
+    return { status: 'unknown', reason: 'invalid-final-url' };
+  }
+  // 官方后台必须是无自定义端口的 https://mp.weixin.qq.com。
+  if (final.protocol !== 'https:' || final.hostname !== 'mp.weixin.qq.com' || final.port !== '') {
+    return { status: 'unknown', reason: 'non-official-final-url' };
+  }
+
+  const finalPath = final.pathname.toLowerCase();
+  // loginpage path 优先级最高，不依赖页面 HTML 文案。
+  if (finalPath === '/cgi-bin/loginpage' || finalPath.startsWith('/cgi-bin/loginpage/')) {
+    return { status: 'needs-qr', reason: 'explicit-login-page' };
+  }
+
+  const isHomePath = finalPath === '/cgi-bin/home' || finalPath.startsWith('/cgi-bin/home/');
+  if (!isHomePath) return { status: 'unknown', reason: 'unexpected-final-path' };
+
+  const tokenPattern = /[?&]token=\d+/;
+  const hasToken = typeof observedHasToken === 'boolean' ? observedHasToken : tokenPattern.test(final.search);
+  if (hasToken && hasHomeMenu) return { status: 'healthy', reason: 'authenticated-home-page' };
+  if (!hasHomeMenu && (hasLoginFrame || hasAuthRejected)) {
+    return { status: 'needs-qr', reason: 'explicit-login-page' };
+  }
+
+  return {
+    status: 'unknown',
+    reason: hasHomeMenu
+      ? 'home-marker-without-token'
+      : hasToken ? 'missing-home-menu-marker' : 'missing-token-in-final-url',
+  };
+}
+
+/** 确保任何失败信息都不会带出 token/Cookie 值。 */
+export function sanitizeKeepaliveError(message: unknown): string {
+  return String(message ?? '')
+    .replace(/(^|[?&\s])token=([^&\s"'<>]+)/gi, '$1token=***')
+    .replace(/(^|[?&\s])token%3D([^%&\s"'<>]+)/gi, '$1token%3D***')
+    .replace(/\b(cookie\s*[:=]\s*)[^\r\n]+/gi, '$1***')
+    .replace(/\b\d{8,}\b/g, '***');
+}
+
+/**
+ * 页面内探测脚本：从当前官方 origin 的首页路径发起同源 GET，返回同一响应的
+ * status/final URL(path)/HTML/hasToken。finalUrl 仅保留 origin+pathname，
+ * token 只以布尔值带出，绝不把查询串或 token 值返回给 Node 侧。
+ */
+const KEEPALIVE_PROBE_EXPRESSION = `(async () => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25000);
+  try {
+    const officialOrigin = 'https://mp.weixin.qq.com';
+    const pageOrigin = typeof location !== 'undefined' && location.origin === officialOrigin
+      ? location.origin
+      : officialOrigin;
+    const res = await fetch(pageOrigin + '/cgi-bin/home?t=home/index&lang=zh_CN', {
+      method: 'GET',
+      credentials: 'include',
+      redirect: 'follow',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    const html = await res.text();
+    let finalUrl = pageOrigin;
+    let hasToken = false;
+    let hasHomeMenu = false;
+    let hasLoginFrame = false;
+    try {
+      const final = new URL(res.url || pageOrigin);
+      finalUrl = final.origin + final.pathname;
+      hasToken = /[?&]token=\\d+/.test(final.search);
+    } catch {
+      finalUrl = pageOrigin;
+    }
+    // 只在页面上下文检查结构标记，不把响应 HTML/查询串/token 返回 Node。
+    hasHomeMenu = html.includes('new-creation__menu');
+    hasLoginFrame = /\\bid\\s*=\\s*(?:"login_frame"|'login_frame'|login_frame)(?=[\\s>])/i.test(html);
+    // 受保护入口若返回平台明确认证拒绝，说明会话已失效；仅在缺少 home marker 时才采信。
+    const hasAuthRejected = /登录超时/.test(html);
+    return { httpStatus: res.status, finalUrl, hasToken, hasHomeMenu, hasLoginFrame, hasAuthRejected };
+  } catch (err) {
+    return { error: err && err.name === 'AbortError' ? 'fetch-timeout' : String((err && err.message) || err) };
+  } finally {
+    clearTimeout(timer);
+  }
+})()`;
+
+/** 仅对官方站点发起一次 HTTPS GET；不读取 Cookie，不导出 token。 */
+export async function observeKeepalivePage(session: EditorSession): Promise<KeepaliveObservation> {
+  try {
+    const observation = await evaluatePage<KeepaliveObservation>(session, KEEPALIVE_PROBE_EXPRESSION);
+    return observation && typeof observation === 'object' ? observation : { error: 'empty-observation' };
+  } catch (err: any) {
+    return { error: `cdp-evaluate-failed: ${err?.message || err}` };
   }
 }
 
-export async function runKeepaliveSession(): Promise<number> {
-  const connected = await connectOrCreateHomeSession();
+export interface KeepaliveDependencies {
+  connect?: () => Promise<{ cdp: Pick<CdpConnection, 'close'>; homeSession: EditorSession }>;
+  observe?: (session: EditorSession) => Promise<KeepaliveObservation>;
+  log?: (message: string) => void;
+  logError?: (message: string) => void;
+}
+
+export async function runKeepaliveSession(dependencies: KeepaliveDependencies = {}): Promise<number> {
+  const log = dependencies.log || ((message: string) => console.log(message));
+  const logError = dependencies.logError || ((message: string) => console.error(message));
+  let cdp: Pick<CdpConnection, 'close'> | undefined;
   try {
-    console.log(`[wechat-batch] ✅ 公众号后台会话就绪，Token: ***${connected.token.slice(-4)}`);
-    const before = await getWechatAuthCookieExpiry(connected.cdp);
+    const connected = dependencies.connect
+      ? await dependencies.connect()
+      : await connectOrCreateHomeSession({ checkSessionCookie: false, requireReadyHome: false });
+    cdp = connected.cdp;
 
-    const check = await evaluatePage<{ ok: boolean; status: number; hasToken: boolean; isLoginPage: boolean }>(
-      connected.homeSession,
-      `(async () => {
-        const res = await fetch('/cgi-bin/home?t=home/index&lang=zh_CN&token=' + encodeURIComponent(${JSON.stringify(connected.token)}), {
-          credentials: 'include',
-        });
-        const html = await res.text();
-        return {
-          ok: res.ok,
-          status: res.status,
-          hasToken: res.url.includes('token='),
-          isLoginPage: html.includes('login_frame') || html.includes('扫码登录') && !html.includes('new-creation__menu'),
-        };
-      })()`
-    );
-
-    if (!check.ok || !check.hasToken || check.isLoginPage) {
-      throw new Error(`[wechat-batch] 公众号后台登录态已失效 (HTTP ${check.status}, hasToken=${check.hasToken})，请在专用浏览器扫码续期后重试 (needs-attention)`);
+    // 后台标签会被浏览器节流（visibilityState=hidden），页内 fetch 与 AbortController
+    // 计时可能被大幅延迟，造成假 unknown。探测前把任务标签切到前台。
+    const probeCdp: any = (connected.homeSession as any)?.cdp;
+    if (probeCdp && typeof probeCdp.send === 'function' && connected.homeSession.sessionId) {
+      try {
+        await probeCdp.send('Page.bringToFront', {}, { sessionId: connected.homeSession.sessionId });
+      } catch {}
     }
 
-    const after = await getWechatAuthCookieExpiry(connected.cdp);
-    if (after) {
-      const slidNote = before && after.expiresIso !== before.expiresIso
-        ? ` (已从 ${before.expiresIso} 顺延)`
-        : '';
-      console.log(`[wechat-batch] 🔄 轻量保活成功: ${after.name} 有效期至 ${after.expiresIso} (剩余约 ${after.remainingHours} 小时)${slidNote}`);
+    const observation = dependencies.observe
+      ? await dependencies.observe(connected.homeSession)
+      : await observeKeepalivePage(connected.homeSession);
+    const verdict = classifyKeepaliveObservation(observation);
+
+    if (verdict.status === 'healthy') {
+      log(`[wechat-batch] keepalive-status=healthy (HTTP ${observation.httpStatus}, 官方后台首页标记正常)`);
+    } else if (verdict.status === 'needs-qr') {
+      log('[wechat-batch] keepalive-status=needs-qr (检测到明确登录页，请在专用浏览器中人工扫码续期)');
     } else {
-      console.log(`[wechat-batch] 🔄 轻量保活成功: 后台首页心跳响应正常 (HTTP ${check.status})`);
+      log(`[wechat-batch] keepalive-status=unknown (${verdict.reason}；未确认后台可用，请人工检查专用浏览器网络与登录态)`);
     }
-    return 0;
+    return KEEPALIVE_EXIT_CODES[verdict.status];
+  } catch (err: any) {
+    const safeMessage = sanitizeKeepaliveError(err?.message || err);
+    logError(`[wechat-batch] keepalive-status=unknown (无法完成后台访问: ${safeMessage})`);
+    logError('[wechat-batch] 未确认后台可用，请人工检查专用浏览器网络与登录态');
+    return KEEPALIVE_EXIT_CODES.unknown;
   } finally {
-    try { connected.cdp.close(); } catch {}
+    try { cdp?.close(); } catch {}
   }
 }
 
@@ -1350,9 +1537,14 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
   if (options.days) console.log(`  天数范围: 最近 ${options.days} 天`);
   console.log(`================================================================`);
 
+  // 保活是只读探测：不获取进程锁、不写状态库，也不与正式发布互相阻塞。
+  if (options.keepalive) {
+    return await runKeepaliveSession();
+  }
+
   let lockAcquired = false;
   if (!options.dryRun) {
-    lockAcquired = acquireProcessLock(options.keepalive ? 'batch-fast-wechat-keepalive' : 'batch-fast-wechat');
+    lockAcquired = acquireProcessLock('batch-fast-wechat');
     if (!lockAcquired) {
       console.error(`[wechat-batch] ❌ 无法获取进程锁，可能另有实例正在运行，退出。`);
       return 1;
@@ -1360,9 +1552,6 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
   }
 
   try {
-    if (options.keepalive) {
-      return await runKeepaliveSession();
-    }
     const legacyBaseline = getOrCreateLegacyBaseline({ persist: !options.dryRun });
 
     // 锁内先持久化当前合并记录 (新文在此刻已入库，status: untracked，避免 record 时找不到 target)

@@ -46,7 +46,12 @@ if (!fs.existsSync(batchScript)) {
   process.exit(1);
 }
 
-if (!args.some(arg => ['--dry-run', '--help', '-h'].includes(arg))) {
+// 只有严格单独的 --keepalive（或 --help/-h、--dry-run）才跳过 tsc。
+// 任何与业务参数混用的 --keepalive 都会先通过 TypeScript 检查，再由参数门禁以退出码 2 拒绝。
+const isLoneKeepalive = args.length === 1 && args[0] === '--keepalive';
+const isHelpRequest = args.some(arg => arg === '--help' || arg === '-h');
+const isDryRun = args.includes('--dry-run');
+if (!isLoneKeepalive && !isHelpRequest && !isDryRun) {
   const tsc = path.join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc');
   if (!fs.existsSync(tsc)) {
     console.error('[wechat-launcher] 缺少 TypeScript，请先安装项目依赖 (bun install)');

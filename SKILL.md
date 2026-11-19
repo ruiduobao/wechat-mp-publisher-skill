@@ -73,7 +73,9 @@ node bin/launch-publisher.mjs --refresh-content --id <articleId>
 # 批量任务
 node bin/launch-publisher.mjs --titles "C:/Users/Administrator/.agents/skills/wechat-md-pipeline/data/titles-override.json"
 
-# 轻量登录态保活（仅静默访问后台首页顺延 96 小时滑动 Cookie，不扫描或改写草稿）
+# 轻量登录态探测（单独使用；仅访问官方后台首页检测当前登录态，不扫描/不改写草稿）
+# 平台负责会话期限，不保证续期天数/月数；仅明确登录页才提示人工扫码续期。
+# 输出 keepalive-status=healthy|needs-qr|unknown（退出码 0/3/4），unknown 不代表需要扫码。
 node bin/launch-publisher.mjs --keepalive
 ```
 
