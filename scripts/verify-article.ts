@@ -39,6 +39,8 @@ export interface ExtractedArticleClaims {
   paperTitle?: string;
   journalOrSource?: string;
   authors?: string;
+  /** 论文自身 DOI（来自专门的 DOI 字段行）；只有它参与标题一致性比对。 */
+  primaryDoi?: string;
   dois: string[];
   arxivIds: string[];
   urls: string[];
@@ -85,6 +87,11 @@ export function extractArticleClaims(markdown: string, filePath = 'article.md'):
   const authorMatch = markdown.match(/^[ \t]*(?:[-*]|\>)\s*\*{0,2}(?:通讯作者|作者|Authors?)\s*[：:]\*{0,2}\s*(.+)$/im);
   const authors = authorMatch?.[1]?.replace(/\*/g, '').trim();
 
+  // 专门 DOI 字段行（- DOI：10.xxx/yyy）代表论文自身 DOI；
+  // “主要数据/代码与数据”等字段里的 DOI 是数据集、代码或参考文献，不参与标题一致性比对。
+  const primaryDoiMatch = markdown.match(/^[ \t]*(?:[-*]|\>)\s*\*{0,2}DOI\*{0,2}\s*[：:]\s*\*{0,2}(10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+)/im);
+  const primaryDoi = primaryDoiMatch?.[1] ? cleanTrailingPunctuation(primaryDoiMatch[1]) : undefined;
+
   const withoutCode = markdown
     .replace(/```[\s\S]*?```/g, '')
     .replace(/`[^`]*`/g, '');
@@ -125,12 +132,17 @@ export function extractArticleClaims(markdown: string, filePath = 'article.md'):
     } catch {}
   }
 
+  const dois = Array.from(doiSet);
+  // 若文章没有独立 DOI 字段行，退化为“首个 DOI 视为论文 DOI”，避免放宽标题校验。
+  const resolvedPrimaryDoi = primaryDoi || dois[0];
+
   return {
     articleTitle,
     paperTitle,
     journalOrSource,
     authors,
-    dois: Array.from(doiSet),
+    primaryDoi: resolvedPrimaryDoi,
+    dois,
     arxivIds: Array.from(arxivSet),
     urls: Array.from(urlSet).slice(0, 6),
   };
@@ -439,7 +451,9 @@ export async function verifyArticleTruth(filePath: string, options: VerifyOption
 
   if (!options.offline) {
     const [dois, arxivs, urls] = await Promise.all([
-      Promise.all(extracted.dois.map(d => verifySingleDoi(d, extracted.paperTitle, options))),
+      Promise.all(extracted.dois.map(d =>
+        verifySingleDoi(d, d === extracted.primaryDoi ? extracted.paperTitle : undefined, options)
+      )),
       Promise.all(extracted.arxivIds.map(a => verifySingleArxiv(a, extracted.paperTitle, options))),
       Promise.all(extracted.urls.map(u => verifySingleUrl(u, options))),
     ]);
