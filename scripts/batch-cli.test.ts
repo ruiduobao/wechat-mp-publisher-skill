@@ -13,6 +13,7 @@ import {
   classifyKeepaliveObservation,
   isOfficialHomeTargetUrl,
   observeKeepalivePage,
+  probeKeepaliveByNavigation,
   runKeepaliveSession,
   sanitizeKeepaliveError,
 } from './batch-fast-wechat.ts';
@@ -462,7 +463,7 @@ test('keepalive 首页标签被冻结时改用新标签复核，不把 needs-qr 
     hasAuthRejected: true,
   } as any);
   expect(recovered.code).toBe(3);
-  expect(recovered.output).toContain('新标签复核');
+  expect(recovered.output).toContain('复核');
   expect(recovered.output).toContain('keepalive-status=needs-qr');
 
   const healthy = await runWith({
@@ -478,6 +479,54 @@ test('keepalive 首页标签被冻结时改用新标签复核，不把 needs-qr 
   expect(stillBroken.code).toBe(4);
   expect(stillBroken.output).toContain('keepalive-status=unknown');
   expect(stillBroken.output).not.toContain('扫码');
+});
+
+test('keepalive 导航探测按真实页面状态判定，二维码连接页也视为登录页', async () => {
+  expect(
+    classifyKeepaliveObservation({
+      httpStatus: 200,
+      finalUrl: 'https://mp.weixin.qq.com/cgi-bin/mpqrconnect?foo=1',
+    } as any).status
+  ).toBe('needs-qr');
+
+  const makeCdp = (value: any) => {
+    let evalCalls = 0;
+    return {
+      async send(method: string) {
+        if (method === 'Target.createTarget') return { targetId: 't1' };
+        if (method === 'Target.attachToTarget') return { sessionId: 's1' };
+        if (method === 'Target.closeTarget') return {};
+        if (method === 'Runtime.evaluate') {
+          evalCalls += 1;
+          if (evalCalls < 2) return { result: { value: { ready: 'loading', path: '/' } } };
+          return { result: { value } };
+        }
+        return {};
+      },
+    };
+  };
+
+  const healthy = await probeKeepaliveByNavigation(
+    makeCdp({ ready: 'complete', path: '/cgi-bin/home', hasToken: true, hasHomeMenu: true, hasLoginFrame: false, hasAuthRejected: false })
+  );
+  expect(healthy.httpStatus).toBe(200);
+  expect(healthy.finalUrl).toBe('https://mp.weixin.qq.com/cgi-bin/home');
+  expect(healthy.hasToken).toBe(true);
+  expect(healthy.hasHomeMenu).toBe(true);
+  expect(classifyKeepaliveObservation(healthy).status).toBe('healthy');
+
+  const login = await probeKeepaliveByNavigation(
+    makeCdp({ ready: 'complete', path: '/cgi-bin/loginpage', hasToken: false, hasHomeMenu: false, hasLoginFrame: true, hasAuthRejected: false })
+  );
+  expect(classifyKeepaliveObservation(login).status).toBe('needs-qr');
+
+  const broken = await probeKeepaliveByNavigation({
+    async send(method: string) {
+      if (method === 'Target.createTarget') throw new Error('cdp down');
+      return {};
+    },
+  });
+  expect(broken.error).toBeTruthy();
 });
 
 test('keepalive 页面探针返回脱敏 finalUrl + hasToken，响应中不出现 token', async () => {

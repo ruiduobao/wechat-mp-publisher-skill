@@ -125,7 +125,7 @@ node bin/launch-publisher.mjs --titles "C:/private/titles-override.json"
 
 登录失效时报告需要续期；模型服务商拒绝子 agent 请求与公众号登录失败是两件不同的事。
 
-微信公众号后台的会话期限由平台控制，本项目无法保证保活能顺延固定小时数、天数或月数。`--keepalive` 路径不读取 Cookie；只有普通发布路径的会话守卫会通过 CDP 读取 Cookie 的名称/域等元数据来确认 `slave_sid` 是否存在，且不记录、不导出、不打印任何 Cookie 值。`--keepalive` 只在需要时尝试一次正常的官方后台首页访问并检测当前登录态是否可用（不扫描、不建稿、不改稿）：
+微信公众号后台的会话期限由平台控制，本项目无法保证保活能顺延固定小时数、天数或月数。实测平台下发的 `slave_sid`/`data_ticket` 等会话 Cookie 的 `Max-Age` 约为 4 天，且新登录（含在其它浏览器登录同一账号）可能让旧 Web 会话提前失效；因此“扫一次管一个月”不成立。`--keepalive` 路径不读取 Cookie；只有普通发布路径的会话守卫会通过 CDP 读取 Cookie 的名称/域等元数据来确认 `slave_sid` 是否存在，且不记录、不导出、不打印任何 Cookie 值。`--keepalive` 只会开一个任务自有标签正常访问一次官方后台首页，读取最终路径、是否带 token 与页面结构标记后立即关闭该标签（不扫描、不建稿、不改稿、不动用户标签）：
 
 ```bash
 bun run keepalive
@@ -133,7 +133,7 @@ bun run keepalive
 node bin/launch-publisher.mjs --keepalive
 ```
 
-判定输出固定为 `keepalive-status=healthy|needs-qr|unknown`，分别对应退出码 0/3/4：healthy 要求 HTTP 2xx、最终 URL 含 token 且页面含后台新建菜单；只有明确登录页才判定 needs-qr 并建议人工扫码续期；网络/CDP 故障、5xx/429 或无法识别的 200 页面均判定 unknown。unknown 仅表示未能确认当前状态，不代表登录失效，也不要据此提示扫码。建议按需运行；扫码续期始终由人工完成。
+判定输出固定为 `keepalive-status=healthy|needs-qr|unknown`，分别对应退出码 0/3/4：healthy 要求页面最终落在官方 `/cgi-bin/home`、URL 含 token 且页面出现后台新建菜单；落在 `/cgi-bin/loginpage` 或 `/cgi-bin/mpqrconnect` 判定 needs-qr 并建议在专用浏览器人工扫码续期；导航失败、标签未就绪或无法识别的页面判定 unknown。unknown 仅表示未能确认当前状态，不代表登录失效，也不要据此提示扫码。每次观测会追加一行脱敏记录到私有 `wechat-md-pipeline/data/keepalive-history.jsonl`（时间、状态、原因、HTTP 码，不含 token/Cookie），便于定位会话何时失效。扫码续期始终由人工在专用 Profile 窗口完成；请勿在其它浏览器重复登录同一账号，否则可能把自动化会话顶掉。
 
 ## 6. 保存与独立验收
 

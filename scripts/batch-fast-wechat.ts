@@ -1378,8 +1378,11 @@ export function classifyKeepaliveObservation(observation: KeepaliveObservation):
   }
 
   const finalPath = final.pathname.toLowerCase();
-  // loginpage path 优先级最高，不依赖页面 HTML 文案。
-  if (finalPath === '/cgi-bin/loginpage' || finalPath.startsWith('/cgi-bin/loginpage/')) {
+  // 官方二维码连接页 / 登录页都属明确登录入口，不依赖页面文案。
+  if (
+    finalPath === '/cgi-bin/loginpage' || finalPath.startsWith('/cgi-bin/loginpage/') ||
+    finalPath === '/cgi-bin/mpqrconnect' || finalPath.startsWith('/cgi-bin/mpqrconnect/')
+  ) {
     return { status: 'needs-qr', reason: 'explicit-login-page' };
   }
 
@@ -1466,44 +1469,65 @@ export async function observeKeepalivePage(session: EditorSession): Promise<Keep
 }
 
 /**
- * 复用的首页标签可能已被浏览器冻结（渲染进程卡死导致 Runtime.evaluate 超时），
- * 此时不能把 keepalive 直接判成 unknown。改用任务自有新标签正常打开官方首页，
- * 在同一 origin 下再探测一次；探测结束立即关闭该标签，不动用户标签。
+ * 以“真实导航 + 页面状态”判定登录态：开一个任务自有标签访问官方首页，
+ * 等文档加载完成，读取最终 pathname、是否带 token、是否出现后台菜单/登录框，
+ * 结束后关闭标签。相比页内 fetch，这条路与用户实际打开后台的行为一致，
+ * 不会因缺少 token 查询串或 Referer 被服务端误判成登录超时。
  */
-export async function observeKeepaliveInFreshTab(cdp: any): Promise<KeepaliveObservation> {
+export async function probeKeepaliveByNavigation(cdp: any): Promise<KeepaliveObservation> {
   let targetId: string | undefined;
   try {
-    const created: any = await cdp.send('Target.createTarget', { url: 'about:blank' });
+    const created: any = await cdp.send('Target.createTarget', { url: 'https://mp.weixin.qq.com/' });
     targetId = created?.targetId;
-    if (!targetId) return { error: 'fresh-tab-create-failed' };
+    if (!targetId) return { error: 'probe-tab-create-failed' };
     const attached: any = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
     const sessionId = attached?.sessionId;
-    if (!sessionId) return { error: 'fresh-tab-attach-failed' };
-    await cdp.send('Page.enable', {}, { sessionId });
-    await cdp.send('Page.navigate', { url: 'https://mp.weixin.qq.com/' }, { sessionId });
+    if (!sessionId) return { error: 'probe-tab-attach-failed' };
 
-    let ready = false;
-    for (let i = 0; i < 24; i += 1) {
-      await new Promise(resolve => setTimeout(resolve, 750));
-      const state: any = await cdp
-        .send('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true }, { sessionId })
+    let observation: KeepaliveObservation | undefined;
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const evaluated: any = await cdp
+        .send(
+          'Runtime.evaluate',
+          {
+            expression: `(() => {
+              const text = document.body ? (document.body.innerText || '') : '';
+              return {
+                ready: document.readyState,
+                path: location.pathname,
+                hasToken: /[?&]token=\\d+/.test(location.search),
+                hasHomeMenu: Boolean(document.querySelector('.new-creation__menu')),
+                hasLoginFrame: Boolean(document.querySelector('#login_frame')),
+                hasAuthRejected: text.includes('登录超时'),
+              };
+            })()`,
+            returnByValue: true,
+          },
+          { sessionId }
+        )
         .catch(() => null);
-      if (state?.result?.value === 'complete') {
-        ready = true;
-        break;
-      }
+      const value = evaluated?.result?.value;
+      if (!value || value.ready !== 'complete') continue;
+      const path = String(value.path || '');
+      if (!path.startsWith('/cgi-bin/')) continue;
+      observation = {
+        httpStatus: 200,
+        finalUrl: `https://mp.weixin.qq.com${path}`,
+        hasToken: Boolean(value.hasToken),
+        hasHomeMenu: Boolean(value.hasHomeMenu),
+        hasLoginFrame: Boolean(value.hasLoginFrame),
+        hasAuthRejected: Boolean(value.hasAuthRejected),
+      };
+      const settled =
+        path.startsWith('/cgi-bin/home') ||
+        path.startsWith('/cgi-bin/loginpage') ||
+        path.startsWith('/cgi-bin/mpqrconnect');
+      if (settled) break;
     }
-    if (!ready) return { error: 'fresh-tab-not-ready' };
-
-    const evaluated: any = await cdp.send(
-      'Runtime.evaluate',
-      { expression: KEEPALIVE_PROBE_EXPRESSION, awaitPromise: true, returnByValue: true },
-      { sessionId }
-    );
-    const observation = evaluated?.result?.value;
-    return observation && typeof observation === 'object' ? observation : { error: 'empty-fresh-tab-observation' };
+    return observation ?? { error: 'probe-tab-not-ready' };
   } catch (err: any) {
-    return { error: `fresh-tab-probe-failed: ${err?.message || err}` };
+    return { error: `probe-tab-failed: ${err?.message || err}` };
   } finally {
     if (targetId) {
       try { await cdp.send('Target.closeTarget', { targetId }); } catch {}
@@ -1515,6 +1539,8 @@ export interface KeepaliveDependencies {
   connect?: () => Promise<{ cdp: Pick<CdpConnection, 'close'>; homeSession: EditorSession }>;
   observe?: (session: EditorSession) => Promise<KeepaliveObservation>;
   observeFreshTab?: (cdp: any) => Promise<KeepaliveObservation>;
+  /** 私有保活观测日志路径；传 null 关闭。仅生产路径（未注入 connect）默认开启。 */
+  telemetryPath?: string | null;
   log?: (message: string) => void;
   logError?: (message: string) => void;
 }
@@ -1522,6 +1548,21 @@ export interface KeepaliveDependencies {
 export async function runKeepaliveSession(dependencies: KeepaliveDependencies = {}): Promise<number> {
   const log = dependencies.log || ((message: string) => console.log(message));
   const logError = dependencies.logError || ((message: string) => console.error(message));
+  const telemetryPath = dependencies.telemetryPath !== undefined
+    ? dependencies.telemetryPath
+    : process.env.WECHAT_KEEPALIVE_LOG
+      || (dependencies.connect
+        ? null
+        : path.join(process.env.USERPROFILE || process.env.HOME || '.', '.agents', 'skills', 'wechat-md-pipeline', 'data', 'keepalive-history.jsonl'));
+  const recordTelemetry = (status: string, reason: string, httpStatus?: number) => {
+    if (!telemetryPath) return;
+    try {
+      fs.appendFileSync(
+        telemetryPath,
+        `${JSON.stringify({ at: new Date().toISOString(), status, reason, httpStatus: httpStatus ?? null })}\n`
+      );
+    } catch {}
+  };
   let cdp: Pick<CdpConnection, 'close'> | undefined;
   try {
     const connected = dependencies.connect
@@ -1529,8 +1570,8 @@ export async function runKeepaliveSession(dependencies: KeepaliveDependencies = 
       : await connectOrCreateHomeSession({ checkSessionCookie: false, requireReadyHome: false });
     cdp = connected.cdp;
 
-    // 后台标签会被浏览器节流（visibilityState=hidden），页内 fetch 与 AbortController
-    // 计时可能被大幅延迟，造成假 unknown。探测前把任务标签切到前台。
+    // 后台标签会被浏览器节流（visibilityState=hidden），渲染进程也可能被冻结。
+    // 探测前把现有任务标签切到前台；实际判定走任务自有新标签的真实导航。
     const probeCdp: any = (connected.homeSession as any)?.cdp;
     if (probeCdp && typeof probeCdp.send === 'function' && connected.homeSession.sessionId) {
       try {
@@ -1540,22 +1581,19 @@ export async function runKeepaliveSession(dependencies: KeepaliveDependencies = 
 
     let observation = dependencies.observe
       ? await dependencies.observe(connected.homeSession)
-      : await observeKeepalivePage(connected.homeSession);
+      : await probeKeepaliveByNavigation(cdp as any);
 
-    // 首页标签被浏览器冻结时 evaluate 会超时；用任务自有新标签复核一次，
-    // 避免把可明确判定的 needs-qr / healthy 误报成 unknown。
-    if (observation.error && typeof (cdp as any)?.send === 'function') {
-      const freshProbe = dependencies.observeFreshTab
-        ?? (dependencies.observe ? undefined : observeKeepaliveInFreshTab);
-      if (freshProbe) {
-        log('[wechat-batch] 首页标签探测失败，改用任务自有新标签复核一次…');
-        const fresh = await freshProbe(cdp as any);
-        if (!fresh.error) observation = fresh;
-        else logError(`[wechat-batch] 新标签复核也失败: ${sanitizeKeepaliveError(fresh.error)}`);
-      }
+    // 导航探测失败时，如注入了复核实现则再试一次；避免把可明确判定的
+    // needs-qr / healthy 误报成 unknown。
+    if (observation.error && typeof (cdp as any)?.send === 'function' && dependencies.observeFreshTab) {
+      log('[wechat-batch] 导航探测失败，改用注入的复核实现再探测一次…');
+      const fresh = await dependencies.observeFreshTab(cdp as any);
+      if (!fresh.error) observation = fresh;
+      else logError(`[wechat-batch] 复核探测也失败: ${sanitizeKeepaliveError(fresh.error)}`);
     }
 
     const verdict = classifyKeepaliveObservation(observation);
+    recordTelemetry(verdict.status, verdict.reason, observation.httpStatus);
 
     if (verdict.status === 'healthy') {
       log(`[wechat-batch] keepalive-status=healthy (HTTP ${observation.httpStatus}, 官方后台首页标记正常)`);
@@ -1567,6 +1605,7 @@ export async function runKeepaliveSession(dependencies: KeepaliveDependencies = 
     return KEEPALIVE_EXIT_CODES[verdict.status];
   } catch (err: any) {
     const safeMessage = sanitizeKeepaliveError(err?.message || err);
+    recordTelemetry('unknown', 'connect-or-observe-failed');
     logError(`[wechat-batch] keepalive-status=unknown (无法完成后台访问: ${safeMessage})`);
     logError('[wechat-batch] 未确认后台可用，请人工检查专用浏览器网络与登录态');
     return KEEPALIVE_EXIT_CODES.unknown;
