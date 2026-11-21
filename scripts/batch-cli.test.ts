@@ -440,6 +440,46 @@ test('keepalive 运行态退出码 0/3/4，失败信息不含 token 且 unknown 
   }
 });
 
+test('keepalive 首页标签被冻结时改用新标签复核，不把 needs-qr 误报成 unknown', async () => {
+  const fakeCdp = { close() {}, send: async () => ({}) };
+  const runWith = async (fresh: Parameters<typeof classifyKeepaliveObservation>[0] | { error: string }) => {
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const code = await runKeepaliveSession({
+      connect: async () => ({ cdp: fakeCdp as any, homeSession: {} as any }),
+      observe: async () => ({ error: 'CDP timeout: Runtime.evaluate' }),
+      observeFreshTab: async () => fresh,
+      log: message => logs.push(message),
+      logError: message => errors.push(message),
+    });
+    return { code, output: [...logs, ...errors].join('\n') };
+  };
+
+  const recovered = await runWith({
+    httpStatus: 200,
+    finalUrl: 'https://mp.weixin.qq.com/cgi-bin/home',
+    hasHomeMenu: false,
+    hasAuthRejected: true,
+  } as any);
+  expect(recovered.code).toBe(3);
+  expect(recovered.output).toContain('新标签复核');
+  expect(recovered.output).toContain('keepalive-status=needs-qr');
+
+  const healthy = await runWith({
+    httpStatus: 200,
+    finalUrl: `https://mp.weixin.qq.com/cgi-bin/home?t=home/index&token=${['556', '6778'].join('')}`,
+    hasHomeMenu: true,
+    hasToken: true,
+  } as any);
+  expect(healthy.code).toBe(0);
+  expect(healthy.output).not.toMatch(/token=[^\s*]/);
+
+  const stillBroken = await runWith({ error: 'fresh-tab-not-ready' });
+  expect(stillBroken.code).toBe(4);
+  expect(stillBroken.output).toContain('keepalive-status=unknown');
+  expect(stillBroken.output).not.toContain('扫码');
+});
+
 test('keepalive 页面探针返回脱敏 finalUrl + hasToken，响应中不出现 token', async () => {
   const syntheticToken = ['246', '8135'].join('');
   let requestedUrl = '';

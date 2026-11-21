@@ -1465,9 +1465,56 @@ export async function observeKeepalivePage(session: EditorSession): Promise<Keep
   }
 }
 
+/**
+ * 复用的首页标签可能已被浏览器冻结（渲染进程卡死导致 Runtime.evaluate 超时），
+ * 此时不能把 keepalive 直接判成 unknown。改用任务自有新标签正常打开官方首页，
+ * 在同一 origin 下再探测一次；探测结束立即关闭该标签，不动用户标签。
+ */
+export async function observeKeepaliveInFreshTab(cdp: any): Promise<KeepaliveObservation> {
+  let targetId: string | undefined;
+  try {
+    const created: any = await cdp.send('Target.createTarget', { url: 'about:blank' });
+    targetId = created?.targetId;
+    if (!targetId) return { error: 'fresh-tab-create-failed' };
+    const attached: any = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    const sessionId = attached?.sessionId;
+    if (!sessionId) return { error: 'fresh-tab-attach-failed' };
+    await cdp.send('Page.enable', {}, { sessionId });
+    await cdp.send('Page.navigate', { url: 'https://mp.weixin.qq.com/' }, { sessionId });
+
+    let ready = false;
+    for (let i = 0; i < 24; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 750));
+      const state: any = await cdp
+        .send('Runtime.evaluate', { expression: 'document.readyState', returnByValue: true }, { sessionId })
+        .catch(() => null);
+      if (state?.result?.value === 'complete') {
+        ready = true;
+        break;
+      }
+    }
+    if (!ready) return { error: 'fresh-tab-not-ready' };
+
+    const evaluated: any = await cdp.send(
+      'Runtime.evaluate',
+      { expression: KEEPALIVE_PROBE_EXPRESSION, awaitPromise: true, returnByValue: true },
+      { sessionId }
+    );
+    const observation = evaluated?.result?.value;
+    return observation && typeof observation === 'object' ? observation : { error: 'empty-fresh-tab-observation' };
+  } catch (err: any) {
+    return { error: `fresh-tab-probe-failed: ${err?.message || err}` };
+  } finally {
+    if (targetId) {
+      try { await cdp.send('Target.closeTarget', { targetId }); } catch {}
+    }
+  }
+}
+
 export interface KeepaliveDependencies {
   connect?: () => Promise<{ cdp: Pick<CdpConnection, 'close'>; homeSession: EditorSession }>;
   observe?: (session: EditorSession) => Promise<KeepaliveObservation>;
+  observeFreshTab?: (cdp: any) => Promise<KeepaliveObservation>;
   log?: (message: string) => void;
   logError?: (message: string) => void;
 }
@@ -1491,9 +1538,23 @@ export async function runKeepaliveSession(dependencies: KeepaliveDependencies = 
       } catch {}
     }
 
-    const observation = dependencies.observe
+    let observation = dependencies.observe
       ? await dependencies.observe(connected.homeSession)
       : await observeKeepalivePage(connected.homeSession);
+
+    // 首页标签被浏览器冻结时 evaluate 会超时；用任务自有新标签复核一次，
+    // 避免把可明确判定的 needs-qr / healthy 误报成 unknown。
+    if (observation.error && typeof (cdp as any)?.send === 'function') {
+      const freshProbe = dependencies.observeFreshTab
+        ?? (dependencies.observe ? undefined : observeKeepaliveInFreshTab);
+      if (freshProbe) {
+        log('[wechat-batch] 首页标签探测失败，改用任务自有新标签复核一次…');
+        const fresh = await freshProbe(cdp as any);
+        if (!fresh.error) observation = fresh;
+        else logError(`[wechat-batch] 新标签复核也失败: ${sanitizeKeepaliveError(fresh.error)}`);
+      }
+    }
+
     const verdict = classifyKeepaliveObservation(observation);
 
     if (verdict.status === 'healthy') {
