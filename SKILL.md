@@ -22,8 +22,9 @@ node "C:/Users/Administrator/wechat-mp-publisher-skill/bin/launch-publisher.mjs"
 
 - 正式写入前（非 `--repair` 模式）引擎也会默认并发执行在线核查；发现 **404 假 DOI、DOI/arXiv 解析标题与推文声明严重不符、死链、0 字节损坏图片或占位符残留** 时直接阻断该篇同步。
 - **被拦截或告警后的官网二次核验与修复闭环**：被 `--verify` 拦截（如 `doi.org` 404）或告警（如站方 403 / 无 DOI）时，Agent 应进一步前往出版社/期刊/arXiv/Dryad 等**官方页面**直接核实：
+  1. **先用标准工具复核 DOI**：`node scripts/verify-doi-official.mjs <doi> --title "<英文标题>"`（Crossref 元数据 + doi.org Handle + 标题相似度；需要代理时用 `NODE_USE_ENV_PROXY=1` 配合 `HTTPS_PROXY`，不要给脚本传 `--proxy`，避免把本地回环送进代理）。
   1. 若官网确认论文与 DOI 真实存在，仅因新发表尚未同步至 `doi.org`/Crossref 或遇到反爬 403，确认内容无误后可显式使用 `--id <articleId> --skip-verify` 放行入草稿箱；
-  2. 若官网核查出推文存在可据实修正的明确笔误（如 DOI 拼写、期号或链接误写，且具备修正授权），据实修正后重新通过 `--verify` 再保存草稿；修正方式优先使用私有 `content-corrections.json` 映射（`{ articleId: [{ find, replaceWith, note }] }`，引擎在内存中逐字替换，**源文件保持只读**，每次应用均打印审计日志；坏 JSON fail-closed，路径可用 `WECHAT_CONTENT_CORRECTIONS_FILE` 注入）；
+  2. 若官网核查出推文存在可据实修正的明确笔误（如 DOI 拼写、期号或链接误写，且具备修正授权），据实修正后重新通过 `--verify` 再保存草稿；修正方式优先使用私有 `content-corrections.json` 映射（`{ articleId: [{ find, replaceWith, note }] }`，引擎在内存中逐字替换，**源文件保持只读**，每次应用均打印审计日志；坏 JSON fail-closed，路径可用 `WECHAT_CONTENT_CORRECTIONS_FILE` 注入）。登记时用 `node scripts/private-json.mjs corrections add <spec.json>`（解析→校验→原子替换；同 `find` 自动更新，不重复追加），不要用内联 `node -e` 拼 JSON；
   3. 若官网查无此文、存在无法修正的伪造/张冠李戴或关键信息无法核实，坚决拦截，不保存到草稿箱。
 - `--strict-verify` 连警告也阻断，`--skip-verify` 仅在人工或官网二次核实确认无误后显式配合 `--id` 使用。
 
@@ -53,6 +54,20 @@ bun run titles "<articleId>=<≤15字短标题>"
 4. 核对正文图片完整性与独立封面。无正文图合法，缺封面可准备独立 PNG/JPEG；本机私有 `generate-covers.py` 可用，但不随公开仓库分发。不能为选封面往正文塞图。
 5. 执行明确范围，保存后独立重开验收。
 
+## 复盘硬规则（2026-11-22 沉淀）
+
+最近两周的 Bug、返工与回滚已归因到五个共同根因（代理信号代替真实路径、单次观测写成长期承诺、字符串/DOM 边界假设、环境与生命周期未纳入契约、修复未回写成检测）。完整账本与证据见 [lessons-learned.md](references/lessons-learned.md)。日常必须遵守：
+
+- **真实路径优先**：登录看真实导航后的页面状态；保存看独立重开；论文看官方元数据；不要把 Cookie 存在、HTTP 200、fetch 成功、`saved-unverified` 当最终结论。
+- **三态输出**：`healthy / needs-qr / unknown` 分别对应继续 / 人工扫码 / 可重试；不确定时不写草稿，也不误报扫码。
+- **不承诺平台期限**：只写“由平台控制”，需要时给实测值和时间，不写“一次管一个月/96 小时”。
+- **登录只在专用 Profile**：其它浏览器/设备登录同一账号可能顶掉自动化会话。
+- **本地回环永不走代理**：启动器已强制 `NO_PROXY=127.0.0.1,localhost,::1`；CDP 先轮询就绪，卡死只重启专用 Profile。
+- **标识符按边界匹配**：占位符、DOI、URL、标题长度按语法边界与码点处理，禁止全局前缀猜测。
+- **派生状态只经工具改**：短标题用 `bun run titles`，内容修正用 `node scripts/private-json.mjs corrections add <spec.json>`；禁止内联 `node -e`/heredoc 拼 JSON。
+- **写入前一次性 preflight**：全部新文外题、真实性、图片完整性、锁与队列一次校验，不合格在写第一笔前停止。
+- **一修一测一诊断**：每个修复配回归测试或可重复诊断命令；排障先看 `node scripts/keepalive-report.mjs 7` 的时间线。
+
 ## 命令选择
 
 `articleId` 是 `source:batch:prefix`；微信数字 `appmsgid` 是远端草稿 ID，两者不同。
@@ -76,6 +91,8 @@ node bin/launch-publisher.mjs --titles "C:/Users/Administrator/.agents/skills/we
 # 轻量登录态探测（单独使用；仅访问官方后台首页检测当前登录态，不扫描/不改写草稿）
 # 平台负责会话期限，不保证续期天数/月数；仅明确登录页才提示人工扫码续期。
 # 输出 keepalive-status=healthy|needs-qr|unknown（退出码 0/3/4），unknown 不代表需要扫码。
+# 专用浏览器端口无响应时会自动只重启专用 Profile；如要禁用自动重启：WECHAT_NO_BROWSER_AUTORESTART=1
+# 历史时间线：node scripts/keepalive-report.mjs 7
 node bin/launch-publisher.mjs --keepalive
 ```
 

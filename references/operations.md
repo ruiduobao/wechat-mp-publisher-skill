@@ -133,7 +133,7 @@ bun run keepalive
 node bin/launch-publisher.mjs --keepalive
 ```
 
-判定输出固定为 `keepalive-status=healthy|needs-qr|unknown`，分别对应退出码 0/3/4：healthy 要求页面最终落在官方 `/cgi-bin/home`、URL 含 token 且页面出现后台新建菜单；落在 `/cgi-bin/loginpage` 或 `/cgi-bin/mpqrconnect` 判定 needs-qr 并建议在专用浏览器人工扫码续期；导航失败、标签未就绪或无法识别的页面判定 unknown。unknown 仅表示未能确认当前状态，不代表登录失效，也不要据此提示扫码。每次观测会追加一行脱敏记录到私有 `wechat-md-pipeline/data/keepalive-history.jsonl`（时间、状态、原因、HTTP 码，不含 token/Cookie），便于定位会话何时失效。扫码续期始终由人工在专用 Profile 窗口完成；请勿在其它浏览器重复登录同一账号，否则可能把自动化会话顶掉。
+判定输出固定为 `keepalive-status=healthy|needs-qr|unknown`，分别对应退出码 0/3/4：healthy 要求页面最终落在官方 `/cgi-bin/home`、URL 含 token 且页面出现后台新建菜单；落在 `/cgi-bin/loginpage` 或 `/cgi-bin/mpqrconnect` 判定 needs-qr 并建议在专用浏览器人工扫码续期；导航失败、标签未就绪或无法识别的页面判定 unknown。unknown 仅表示未能确认当前状态，不代表登录失效，也不要据此提示扫码。每次观测会追加一行脱敏记录到私有 `wechat-md-pipeline/data/keepalive-history.jsonl`（时间、状态、原因、HTTP 码，不含 token/Cookie），用 `node scripts/keepalive-report.mjs 7` 可查看状态切换时间线。调试端口“进程在、CDP 不响应”时，引擎只终止 `user-data-dir` 精确等于专用 Profile 的 Edge 进程并重新拉起（`WECHAT_NO_BROWSER_AUTORESTART=1` 可禁用）；本地回环已在启动器强制加入 `NO_PROXY`，不受 Clash 等系统代理开关影响。扫码续期始终由人工在专用 Profile 窗口完成；请勿在其它浏览器重复登录同一账号，否则可能把自动化会话顶掉。
 
 ## 6. 保存与独立验收
 
@@ -157,4 +157,26 @@ node bin/launch-publisher.mjs --keepalive
 
 按本次开始时的任务集合统计：扫描来源数、唯一新增成功数、已有稿更新数、原有已验证跳过数、待核对、缺图、特殊消息类型、失败或未验收。相同新文先失败再修补通过，仍只算一篇新增成功，不能再算一篇独立更新资产。
 
-详细诊断写私有报告，公开总结只给步骤、测试类别及实际结论。不要公开文章正文、账号模板、登录参数或状态映射。故障对照见 [troubleshooting.md](troubleshooting.md)，测试方法见 [testing.md](testing.md)。
+### 现场故障速查（2026-11-22 复盘）
+
+排障顺序固定：先看时间线，再看环境，再动代码。
+
+1. **登录态相关**
+   - 先跑 `node scripts/keepalive-report.mjs 7`：确认是“真掉线”还是“误报/环境故障”。
+   - `needs-qr`：只提示在专用 Baoyu Profile 窗口扫码；其它浏览器登录会顶掉会话。
+   - `unknown`：不要提示扫码。检查 `NO_PROXY` 是否包含 `127.0.0.1,localhost,::1`（启动器已强制）；检查调试端口是否“进程在、CDP 不响应”。引擎会自动只重启专用 Profile；禁用自动重启用 `WECHAT_NO_BROWSER_AUTORESTART=1`。
+   - 平台会话 Cookie 实测 `Max-Age≈4 天`，任何“一个月”表述都不成立。
+2. **占位符/图片相关**
+   - `未定位到占位符 WECHATIMGPH_n`：先确认编辑器里该占位符是否只出现一次。必要时用 `WECHAT_DEBUG_PLACEHOLDER=1` 重跑，看 `count/strippedCount/hits`。
+   - 已知陷阱：下一个块以数字开头（如图注年份 2026）时，旧逻辑会把 `WECHATIMGPH_1` 误判成 `WECHATIMGPH_10` 前缀；现已按文本节点匹配修复。
+   - 图片上传失败但本地文件正常：检查是否是重复引用同一图片或占位符被粘贴阶段拆分。
+3. **DOI/链接相关**
+   - 自动核查 `network-error`：先用 `node scripts/verify-doi-official.mjs <doi> --title "<英文标题>"` 做 Crossref + doi.org 双重核验；仍需代理时用 `NODE_USE_ENV_PROXY=1` 配合 `HTTPS_PROXY`，不要给本地回环设代理。
+   - 论文真实但代码库 404：按事实在 `content-corrections.json` 改写为“代码暂未公开”，用 `node scripts/private-json.mjs corrections add <spec.json>` 登记，禁止内联 `node -e` 拼 JSON。
+   - 只有主 DOI（`- DOI：` 行）参与标题相似度；参考文献/数据集 DOI 只检查可解析。
+4. **批量写入相关**
+   - 写入前会一次性校验全部新文外题（≤15 码点）；缺题直接停止，不会跑半批。
+   - `saved-unverified` 是“已保全 ID、尚未独立复验”的中间态；只有独立重开 8 项全过才算成功。
+   - 批次中途失败后重跑同一条命令即可续传；不要手工改历史或另建替代稿。
+
+详细诊断写私有报告，公开总结只给步骤、测试类别及实际结论。不要公开文章正文、账号模板、登录参数或状态映射。故障对照见 [troubleshooting.md](troubleshooting.md)，事故根因与长期规则见 [lessons-learned.md](lessons-learned.md)，测试方法见 [testing.md](testing.md)。

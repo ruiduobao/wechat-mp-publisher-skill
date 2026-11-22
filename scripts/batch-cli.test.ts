@@ -11,6 +11,7 @@ import type { EditorSession } from './editor-features.ts';
 import { mergeShortTitles } from './set-titles.ts';
 import {
   classifyKeepaliveObservation,
+  collectNewArticleTitleProblems,
   isOfficialHomeTargetUrl,
   observeKeepalivePage,
   probeKeepaliveByNavigation,
@@ -479,6 +480,36 @@ test('keepalive 首页标签被冻结时改用新标签复核，不把 needs-qr 
   expect(stillBroken.code).toBe(4);
   expect(stillBroken.output).toContain('keepalive-status=unknown');
   expect(stillBroken.output).not.toContain('扫码');
+});
+
+test('写入前外题 preflight: 一次性列出全部缺题新文，已有 ID 与短题不受影响', () => {
+  const makeItem = (id: string, title: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title,
+    file: `${id}.md`,
+    source: 'muse',
+    batch: '20261122_1700',
+    ...extra,
+  }) as any;
+
+  const problems = collectNewArticleTitleProblems(
+    [
+      makeItem('muse:20261122_1700:01', '这是一个明显超过十五个字的完整原标题，需要短标题'),
+      makeItem('muse:20261122_1700:02', '另一个同样超过十五个字的新文章完整标题内容'),
+    ],
+    { titleMap: { 'muse:20261122_1700:02': '合格短标题' } } as any,
+    new Set<string>()
+  );
+  expect(problems).toHaveLength(1);
+  expect(problems[0]).toContain('muse:20261122_1700:01');
+  expect(problems[0]).toContain('needs-title');
+
+  const fine = collectNewArticleTitleProblems(
+    [makeItem('muse:20261122_1700:03', '恰好十五个字的短标题测试用', { appmsgid: '100023419' })],
+    {} as any,
+    new Set<string>()
+  );
+  expect(fine).toEqual([]);
 });
 
 test('keepalive 导航探测按真实页面状态判定，二维码连接页也视为登录页', async () => {

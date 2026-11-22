@@ -181,8 +181,11 @@ node bin/launch-publisher.mjs --help
 | [`scripts/verify-article.ts`](scripts/verify-article.ts) | 推文真实性、论文标题、DOI/arXiv/原文链接与图片核查（`bun run verify`） |
 | [`scripts/set-titles.ts`](scripts/set-titles.ts) | 15 字短标题校验与安全合并工具（`bun run titles`） |
 | [`scripts/wechat-article.ts`](scripts/wechat-article.ts) | 单篇独立发布命令行工具（`bun run article`） |
+| [`scripts/private-json.mjs`](scripts/private-json.mjs) | 私有状态 JSON 安全编辑（解析→校验→原子替换；内容修正登记） |
+| [`scripts/verify-doi-official.mjs`](scripts/verify-doi-official.mjs) | DOI 官网二次核验（Crossref 元数据 + doi.org Handle + 标题相似度） |
+| [`scripts/keepalive-report.mjs`](scripts/keepalive-report.mjs) | 登录态时间线报告（读取私有遥测，定位掉线与误报） |
 | [`.env.example`](.env.example) | 环境变量配置模板（复制为 `.env` 即可快速定制你的账号与目录） |
-| [`references/`](references/operations.md) | 详细操作手册、故障排查、配置说明、独立测试矩阵与验证记录 |
+| [`references/`](references/operations.md) | 详细操作手册、故障排查、配置说明、独立测试矩阵与验证记录；事故根因见 [`lessons-learned.md`](references/lessons-learned.md) |
 | [`NOTICE`](NOTICE) / [`LICENSE`](LICENSE) | MIT 开源协议及上游归属声明 |
 
 ---

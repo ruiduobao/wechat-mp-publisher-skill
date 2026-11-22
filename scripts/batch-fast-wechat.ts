@@ -16,7 +16,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   CdpConnection,
   findChromeExecutable,
@@ -24,7 +24,6 @@ import {
   getDefaultProfileDir,
   getFreePort,
   sleep,
-  waitForChromeDebugPort,
   type ChromeSession,
 } from './cdp.ts';
 import {
@@ -576,6 +575,65 @@ export function isOfficialHomeTargetUrl(rawUrl: string): boolean {
   }
 }
 
+/**
+ * 专用 Profile 的调试端口可能“进程还在、CDP 已无响应”（浏览器卡死或代理拦截）。
+ * 此时按未运行处理：只终止 user-data-dir 精确等于专用 Profile 的 Edge 进程，
+ * 再由启动逻辑重新拉起常驻实例。绝不触碰用户其它 Edge 窗口。
+ */
+export function terminateDedicatedBrowser(profileDir: string): number {
+  if (process.platform !== 'win32') return 0;
+  try {
+    const target = path.resolve(profileDir).replace(/'/g, "''");
+    const script = [
+      `$target = '${target}'`,
+      "$procs = Get-CimInstance Win32_Process -Filter \"name='msedge.exe'\"",
+      '$killed = 0',
+      'foreach ($p in $procs) {',
+      '  $cmd = $p.CommandLine',
+      '  if (-not $cmd) { continue }',
+      '  if ($cmd.ToLower().Contains($target.ToLower())) {',
+      '    try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; $killed++ } catch {}',
+      '  }',
+      '}',
+      'Write-Output $killed',
+    ].join('\n');
+    const output = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      encoding: 'utf-8',
+      timeout: 15_000,
+    });
+    const count = parseInt((output.stdout || '').trim(), 10);
+    return Number.isFinite(count) ? count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** 读取 CDP 版本信息；端口未就绪或代理干扰时返回 null，不抛出。 */
+async function fetchCdpVersion(port: number, timeoutMs = 2500): Promise<any | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: controller.signal });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 轮询等待调试端口真正可用（浏览器冷启动时端口可能晚于进程出现）。 */
+async function waitForCdpVersion(port: number, timeoutMs: number): Promise<any | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const version = await fetchCdpVersion(port);
+    if (version?.webSocketDebuggerUrl) return version;
+    await sleep(500);
+  }
+  return null;
+}
+
 export interface HomeSessionOptions {
   /** 保活路径必须为 false：不读取 Storage.getCookies，也不导出任何 Cookie 元数据。 */
   checkSessionCookie?: boolean;
@@ -586,7 +644,7 @@ export interface HomeSessionOptions {
 export async function connectOrCreateHomeSession(options: HomeSessionOptions = {}): Promise<ConnectedHome> {
   const { checkSessionCookie = true, requireReadyHome = true } = options;
   const profileDir = getDefaultProfileDir();
-  let cdp: CdpConnection;
+  let cdp: CdpConnection | undefined;
 
   let port = await findEdgeDebugPort(profileDir);
   if (!port) {
@@ -594,14 +652,30 @@ export async function connectOrCreateHomeSession(options: HomeSessionOptions = {
   }
 
   if (port) {
-    try {
-      const version = await fetch(`http://127.0.0.1:${port}/json/version`).then(r => r.json());
-      cdp = await CdpConnection.connect(version.webSocketDebuggerUrl, 12_000);
-      console.log(`[wechat-batch] 成功连接已有浏览器调试端口: ${port}`);
-    } catch (connErr: any) {
-      throw new Error(`[wechat-batch] 发现调试端口 ${port} 但无法建立 WebSocket 连接: ${connErr?.message || connErr}`);
+    // 先用轮询确认端口真的可服务，避免冷启动竞态把“还没起来”误判成“连不上”。
+    let version = await waitForCdpVersion(port, 3_000);
+    if (version) {
+      try {
+        cdp = await CdpConnection.connect(version.webSocketDebuggerUrl, 12_000);
+      } catch {
+        cdp = undefined;
+      }
     }
-  } else {
+    if (cdp) {
+      console.log(`[wechat-batch] 成功连接已有浏览器调试端口: ${port}`);
+    } else {
+      console.warn(`[wechat-batch] 调试端口 ${port} 无响应，专用浏览器可能已卡死`);
+      if (process.env.WECHAT_NO_BROWSER_AUTORESTART === '1') {
+        throw new Error(`[wechat-batch] 调试端口 ${port} 无法建立连接，且已禁用自动重启 (WECHAT_NO_BROWSER_AUTORESTART=1)`);
+      }
+      const killed = terminateDedicatedBrowser(profileDir);
+      console.warn(`[wechat-batch] 已终止专用 Profile 卡死进程 ${killed} 个，准备重新拉起`);
+      await sleep(1_500);
+      port = undefined;
+    }
+  }
+
+  if (!cdp) {
     const chromePath = findChromeExecutable();
     if (!chromePath) {
       throw new Error('[wechat-batch] 未找到可用的 Edge/Chrome 可执行文件，请设置 WECHAT_BROWSER_CHROME_PATH (需要 attention)');
@@ -623,9 +697,17 @@ export async function connectOrCreateHomeSession(options: HomeSessionOptions = {
     );
     child.unref();
 
-    const wsUrl = await waitForChromeDebugPort(freePort, 25_000, { includeLastError: true });
-    cdp = await CdpConnection.connect(wsUrl, 12_000);
+    // 冷启动时端口可能明显晚于进程出现；轮询 45 秒，避免一次过早判断就失败。
+    const version = await waitForCdpVersion(freePort, 45_000);
+    if (!version?.webSocketDebuggerUrl) {
+      throw new Error(`[wechat-batch] 专用浏览器已启动但调试端口 ${freePort} 在 45 秒内未就绪`);
+    }
+    cdp = await CdpConnection.connect(version.webSocketDebuggerUrl, 12_000);
     console.log(`[wechat-batch] ✅ 已独立拉起并连接专用浏览器调试端口: ${freePort}`);
+  }
+
+  if (!cdp) {
+    throw new Error('[wechat-batch] 无法建立专用浏览器 CDP 连接');
   }
 
   // CDP 连接成功后任何 Target/attach/evaluate 失败都必须关闭连接再抛出，
@@ -818,6 +900,24 @@ export function resolveOuterTitle(
     throw new Error(`needs-title: 新文 ${item.id} 需要15字以内语义外题，请提供 --title-override 或 --titles`);
   }
   return title;
+}
+
+export function collectNewArticleTitleProblems(
+  candidates: DraftStateRecord[],
+  options: BatchCliOptions,
+  legacyBaseline: Set<string>
+): string[] {
+  const problems: string[] = [];
+  for (const candidate of candidates) {
+    if (planArticleAction(candidate, options, legacyBaseline).action !== 'create') continue;
+    try {
+      resolveOuterTitle(candidate, '', options);
+    } catch (error: any) {
+      if (!String(error?.message).startsWith('needs-title:')) throw error;
+      problems.push(`${candidate.id}: ${error.message}`);
+    }
+  }
+  return problems;
 }
 
 // -----------------------------------------------------------------------------
@@ -1900,6 +2000,15 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
 
     if (verifiedCandidates.length === 0) {
       console.error(`[wechat-batch] ❌ 全部待处理文章均未通过前置真实性/DOI 核查，未启动浏览器，退出。`);
+      return 1;
+    }
+
+    // 写入前一次性校验所有新文外题，避免批量跑到中途才因缺标题停住（留下半批状态）。
+    const missingTitles = collectNewArticleTitleProblems(verifiedCandidates, options, legacyBaseline);
+    if (missingTitles.length > 0) {
+      console.error(`[wechat-batch] ❌ 以下 ${missingTitles.length} 篇新文缺少 ≤15 字外题，已在写入前停止：`);
+      for (const line of missingTitles) console.error(`   - ${line}`);
+      console.error('   修复: bun run titles "<articleId>=<短标题>"，再带 --titles 重跑');
       return 1;
     }
 
