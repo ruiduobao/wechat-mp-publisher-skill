@@ -1126,30 +1126,30 @@ export async function locatePlaceholderAndSetAnchor(
     const target = ${JSON.stringify(placeholder)};
     const marker = ${JSON.stringify(`⟦${anchorId}⟧`)};
     const text = editor.textContent || '';
-    const indices = [];
-    for (let offset = 0; offset < text.length;) {
-      const index = text.indexOf(target, offset);
-      if (index < 0) break;
-      if (!/\\d/.test(text[index + target.length] || '')) indices.push(index);
-      offset = index + target.length;
-    }
-    if (indices.length !== 1 || text.includes(marker)) return null;
+    // 占位符不会跨文本节点，必须按单节点匹配。跨块拼接的 textContent 里，
+    // 后面的段落可能以数字开头（如图注年份），不能据此误判为 WECHATIMGPH_10。
     const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+    const matches = [];
+    let consumed = 0;
     let node;
     while ((node = walker.nextNode())) {
-      for (let offset = 0; offset < node.textContent.length;) {
-        const index = node.textContent.indexOf(target, offset);
+      const content = node.textContent || '';
+      for (let offset = 0; offset < content.length;) {
+        const index = content.indexOf(target, offset);
         if (index < 0) break;
         offset = index + target.length;
-        if (/\\d/.test(node.textContent[index + target.length] || '')) continue;
-        node.parentElement.scrollIntoView({ block: 'center' }); editor.focus();
-        const range = document.createRange(); range.setStart(node, index); range.setEnd(node, index + target.length);
-        const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
-        window[${JSON.stringify(anchorId)}] = { oldImages: new Set(editor.querySelectorAll('img')) };
-        return { expectedText: text.slice(0, indices[0]) + marker + text.slice(indices[0] + target.length) };
+        if (/\\d/.test(content[index + target.length] || '')) continue;
+        matches.push({ node, index, global: consumed + index });
       }
+      consumed += content.length;
     }
-    return null;
+    if (matches.length !== 1 || text.includes(marker)) return null;
+    const match = matches[0];
+    match.node.parentElement.scrollIntoView({ block: 'center' }); editor.focus();
+    const range = document.createRange(); range.setStart(match.node, match.index); range.setEnd(match.node, match.index + target.length);
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    window[${JSON.stringify(anchorId)}] = { oldImages: new Set(editor.querySelectorAll('img')) };
+    return { expectedText: text.slice(0, match.global) + marker + text.slice(match.global + target.length) };
   })()`;
 
   const selectionCheckExpr = `(() => {
@@ -1168,7 +1168,40 @@ export async function locatePlaceholderAndSetAnchor(
       await session.cdp.send('Target.activateTarget', { targetId: session.targetId }).catch(() => {});
     }
     selected = await evaluatePage<{ expectedText: string } | null>(session, selectPlaceholderExpr);
-    if (!selected) return false;
+    if (!selected) {
+      if (process.env.WECHAT_DEBUG_PLACEHOLDER) {
+        const diag = await evaluatePage<any>(session, `(() => {
+          const editor = document.querySelector(${JSON.stringify(BODY_EDITOR_SELECTOR)});
+          const text = editor ? editor.textContent || '' : '';
+          const target = ${JSON.stringify(placeholder)};
+          let count = 0;
+          for (let i = text.indexOf(target); i >= 0; i = text.indexOf(target, i + 1)) count += 1;
+          const hits = [];
+          if (editor) {
+            const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+              const content = node.textContent || '';
+              const c = content.split(target).length - 1;
+              if (c > 0) {
+                const at = content.indexOf(target);
+                hits.push({ count: c, around: content.slice(Math.max(0, at - 12), at + target.length + 12) });
+              }
+            }
+          }
+          return {
+            editorFound: Boolean(editor),
+            textLen: text.length,
+            count,
+            strippedCount: text.replace(/\\s/g, '').split(target).length - 1,
+            markerPresent: text.includes(${JSON.stringify(`⟦${anchorId}⟧`)}),
+            hits,
+          };
+        })()`).catch((err: any) => ({ error: String(err?.message || err) }));
+        console.error(`[placeholder-debug] ${placeholder}`, JSON.stringify(diag));
+      }
+      return false;
+    }
     await new Promise(resolve => setTimeout(resolve, 120));
     selectionReady = await evaluatePage<boolean>(session, selectionCheckExpr);
     if (selectionReady) break;
