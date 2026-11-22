@@ -25,6 +25,18 @@ if (fs.existsSync(envPath)) {
   }
 }
 
+// 本地 CDP（127.0.0.1）绝不能走系统代理：Bun 的 fetch 会读取 HTTP_PROXY，
+// 一旦 Clash 等代理未运行，连接调试端口会误报 ECONNREFUSED。
+const noProxyHosts = new Set(
+  String(process.env.NO_PROXY || process.env.no_proxy || '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+);
+for (const host of ['127.0.0.1', 'localhost', '::1']) noProxyHosts.add(host);
+process.env.NO_PROXY = [...noProxyHosts].join(',');
+process.env.no_proxy = process.env.NO_PROXY;
+
 const localBun = path.join(os.homedir(), '.bun', 'bin', process.platform === 'win32' ? 'bun.exe' : 'bun');
 const bunPath = process.env.WECHAT_BUN_PATH || (fs.existsSync(localBun) ? localBun : 'bun');
 const batchScript = path.join(repoRoot, 'scripts', 'batch-fast-wechat.ts');
