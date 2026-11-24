@@ -512,6 +512,24 @@ test('写入前外题 preflight: 一次性列出全部缺题新文，已有 ID �
   expect(fine).toEqual([]);
 });
 
+test('keepalive 官网根路径登录落地页也判定 needs-qr，无登录 UI 时才 unknown', () => {
+  expect(
+    classifyKeepaliveObservation({
+      httpStatus: 200,
+      finalUrl: 'https://mp.weixin.qq.com/',
+      hasLoginFrame: true,
+    } as any).status
+  ).toBe('needs-qr');
+
+  expect(
+    classifyKeepaliveObservation({
+      httpStatus: 200,
+      finalUrl: 'https://mp.weixin.qq.com/',
+      hasLoginFrame: false,
+    } as any).status
+  ).toBe('unknown');
+});
+
 test('keepalive 导航探测按真实页面状态判定，二维码连接页也视为登录页', async () => {
   expect(
     classifyKeepaliveObservation({

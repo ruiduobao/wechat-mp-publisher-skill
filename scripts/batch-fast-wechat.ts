@@ -1487,6 +1487,11 @@ export function classifyKeepaliveObservation(observation: KeepaliveObservation):
   }
 
   const isHomePath = finalPath === '/cgi-bin/home' || finalPath.startsWith('/cgi-bin/home/');
+  // 登出后访问站点根路径会停留在官网登录落地页（path 为 "/"），
+  // 页面同时出现“微信扫一扫/使用账号登录/立即注册”等明确登录 UI。
+  if (!isHomePath && finalPath === '/' && hasLoginFrame) {
+    return { status: 'needs-qr', reason: 'explicit-login-page' };
+  }
   if (!isHomePath) return { status: 'unknown', reason: 'unexpected-final-path' };
 
   const tokenPattern = /[?&]token=\d+/;
@@ -1598,7 +1603,8 @@ export async function probeKeepaliveByNavigation(cdp: any): Promise<KeepaliveObs
                 path: location.pathname,
                 hasToken: /[?&]token=\\d+/.test(location.search),
                 hasHomeMenu: Boolean(document.querySelector('.new-creation__menu')),
-                hasLoginFrame: Boolean(document.querySelector('#login_frame')),
+                hasLoginFrame: Boolean(document.querySelector('#login_frame')) ||
+                  (/微信扫一扫/.test(text) && /使用账号登录/.test(text)),
                 hasAuthRejected: text.includes('登录超时'),
               };
             })()`,
@@ -1610,7 +1616,8 @@ export async function probeKeepaliveByNavigation(cdp: any): Promise<KeepaliveObs
       const value = evaluated?.result?.value;
       if (!value || value.ready !== 'complete') continue;
       const path = String(value.path || '');
-      if (!path.startsWith('/cgi-bin/')) continue;
+      const rootLogin = path === '/' && Boolean(value.hasLoginFrame);
+      if (!path.startsWith('/cgi-bin/') && !rootLogin) continue;
       observation = {
         httpStatus: 200,
         finalUrl: `https://mp.weixin.qq.com${path}`,
@@ -1620,6 +1627,7 @@ export async function probeKeepaliveByNavigation(cdp: any): Promise<KeepaliveObs
         hasAuthRejected: Boolean(value.hasAuthRejected),
       };
       const settled =
+        rootLogin ||
         path.startsWith('/cgi-bin/home') ||
         path.startsWith('/cgi-bin/loginpage') ||
         path.startsWith('/cgi-bin/mpqrconnect');
