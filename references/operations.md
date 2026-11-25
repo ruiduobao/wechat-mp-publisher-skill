@@ -185,5 +185,14 @@ node bin/launch-publisher.mjs --keepalive
    - 写入前会一次性校验全部新文外题（≤15 码点）；缺题直接停止，不会跑半批。
    - `saved-unverified` 是“已保全 ID、尚未独立复验”的中间态；只有独立重开 8 项全过才算成功。
    - 批次中途失败后重跑同一条命令即可续传；不要手工改历史或另建替代稿。
+5. **磁盘/资源相关**
+   - 启动器会检查仓库盘与临时盘空间，低于 `WECHAT_MIN_FREE_MB`（默认 300）直接退出；把 `TEMP`/`TMP` 指向有空间的盘（如 `D:\Temp\zcode`）。
+   - 浏览器缓存用 `WECHAT_BROWSER_CACHE_DIR` 外置；不要把浏览器缓存与临时图片都留在系统盘。
+   - 磁盘写满的典型症状：同步 `ENOSPC`、重开复验 `cloneNode` 空指针、封面/CDN 超时——先看磁盘，不要改内容。
+6. **瞬时故障重试**
+   - 封面 8 秒超时、CDN 图片 40 秒超时、页面加载 `Execution exception` 会自动重试一次；内容/标题/核查错误不会重试。
+   - 重试后仍失败，先查磁盘与网络，再考虑内容。
+
+巡检报告固定包含四项：`keepalive-status`、会话剩余小时（`session-expiry.mjs`）、磁盘剩余、待处理篇数。
 
 详细诊断写私有报告，公开总结只给步骤、测试类别及实际结论。不要公开文章正文、账号模板、登录参数或状态映射。故障对照见 [troubleshooting.md](troubleshooting.md)，事故根因与长期规则见 [lessons-learned.md](lessons-learned.md)，测试方法见 [testing.md](testing.md)。

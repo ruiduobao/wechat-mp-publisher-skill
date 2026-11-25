@@ -66,6 +66,9 @@ bun run titles "<articleId>=<≤15字短标题>"
 - **标识符按边界匹配**：占位符、DOI、URL、标题长度按语法边界与码点处理，禁止全局前缀猜测。
 - **派生状态只经工具改**：短标题用 `bun run titles`，内容修正用 `node scripts/private-json.mjs corrections add <spec.json>`；禁止内联 `node -e`/heredoc 拼 JSON。
 - **写入前一次性 preflight**：全部新文外题、真实性、图片完整性、锁与队列一次校验，不合格在写第一笔前停止。
+- **资源预检**：启动器检查仓库盘与临时盘空间（默认 300MB 安全线），不足直接退出；浏览器缓存用 `WECHAT_BROWSER_CACHE_DIR` 外置，TEMP 可指向 `D:\Temp\zcode`。
+- **瞬时错误自动重试**：封面/CDN/页面加载超时重试一次；内容、标题、核查错误不重试。
+- **平台 TTL 只测不猜**：`node scripts/session-expiry.mjs` 报告会话剩余小时（实测固定 96h、访问不顺延）；不承诺天数、不自动续期。
 - **一修一测一诊断**：每个修复配回归测试或可重复诊断命令；排障先看 `node scripts/keepalive-report.mjs 7` 的时间线。
 
 ## 命令选择

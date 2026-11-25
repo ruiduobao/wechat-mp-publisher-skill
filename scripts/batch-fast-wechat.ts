@@ -904,6 +904,17 @@ export function resolveOuterTitle(
   return title;
 }
 
+/**
+ * 区分“外部瞬时故障”与“内容/流程错误”：前者重试一次通常即可恢复，
+ * 后者重试只会浪费时间和 CDN 配额。只对明确的超时/页面加载类错误放行。
+ */
+export function isTransientPublishFailure(message?: string): boolean {
+  const text = String(message || '');
+  if (!text) return false;
+  if (/needs-title|needs-cover|needs-attention|占位符|未定位|真实性|核查|标题/i.test(text)) return false;
+  return /封面|cover background image|cdn 图片就绪超时|图片上传就绪失败|cloneNode|timeout|超时|execution exception/i.test(text);
+}
+
 export function collectNewArticleTitleProblems(
   candidates: DraftStateRecord[],
   options: BatchCliOptions,
@@ -2033,7 +2044,12 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
       console.log(`\n----------------------------------------------------------------`);
       console.log(`[wechat-batch] 进度 [${i + 1}/${verifiedCandidates.length}] 处理: ${item.id} (appmsgid: ${item.appmsgid || '新建'})`);
 
-      const res = await processSingleArticle(item, connected, options, legacyBaseline);
+      let res = await processSingleArticle(item, connected, options, legacyBaseline);
+      if (!res.success && isTransientPublishFailure(res.error)) {
+        console.warn(`[wechat-batch] ⚠️ 瞬时故障（封面/CDN/页面加载），3 秒后重试一次: ${res.error}`);
+        await sleep(3_000);
+        res = await processSingleArticle(item, connected, options, legacyBaseline);
+      }
       if (res.success) {
         successCount++;
       } else {

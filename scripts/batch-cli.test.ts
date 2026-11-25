@@ -13,6 +13,7 @@ import {
   classifyKeepaliveObservation,
   collectNewArticleTitleProblems,
   isOfficialHomeTargetUrl,
+  isTransientPublishFailure,
   observeKeepalivePage,
   probeKeepaliveByNavigation,
   runKeepaliveSession,
@@ -165,6 +166,7 @@ test('CLI --search / --latest / 不存在ID / --title-override 门禁均按预�
     const env = {
       ...process.env,
       WECHAT_BUN_PATH: process.execPath,
+      WECHAT_MIN_FREE_MB: '1',
       WECHAT_LOCAL_ROOT: local,
       WECHAT_MUSE_ROOT: muse,
       WECHAT_HISTORY_FILE: path.join(state, 'history.json'),
@@ -482,6 +484,17 @@ test('keepalive 首页标签被冻结时改用新标签复核，不把 needs-qr 
   expect(stillBroken.output).not.toContain('扫码');
 });
 
+test('瞬时故障分类: 封面/CDN/页面加载超时才重试，内容与流程错误不重试', () => {
+  expect(isTransientPublishFailure('A模块设置封面失败: Failed setting cover: Timeout after 8000ms waiting for: Cover background image URL populated')).toBe(true);
+  expect(isTransientPublishFailure('图片上传就绪失败 [1/6] (fm4sar_towel.png): 等待目标微信 CDN 图片就绪超时 (40000ms)')).toBe(true);
+  expect(isTransientPublishFailure('[evaluatePage] Execution exception: TypeError: Cannot read properties of null (reading \'cloneNode\')')).toBe(true);
+
+  expect(isTransientPublishFailure('needs-title: 新文需要15字以内语义外题')).toBe(false);
+  expect(isTransientPublishFailure('正文中未定位到占位符: WECHATIMGPH_1')).toBe(false);
+  expect(isTransientPublishFailure('公众号登录态已失效，请在专用浏览器扫码续期')).toBe(false);
+  expect(isTransientPublishFailure('')).toBe(false);
+});
+
 test('写入前外题 preflight: 一次性列出全部缺题新文，已有 ID 与短题不受影响', () => {
   const makeItem = (id: string, title: string, extra: Record<string, unknown> = {}) => ({
     id,
@@ -650,7 +663,7 @@ test('launcher 仅为单独 --keepalive 跳过 tsc，普通写入仍执行 tsc',
       path.join(root, 'node_modules', 'typescript', 'bin', 'tsc'),
       "console.log('TSC_RAN');\nprocess.exit(1);\n"
     );
-    const env = { ...process.env, WECHAT_BUN_PATH: process.execPath };
+    const env = { ...process.env, WECHAT_BUN_PATH: process.execPath, WECHAT_MIN_FREE_MB: '1' };
     const tmpLauncher = path.join(root, 'bin', 'launch-publisher.mjs');
 
     // 单独 --keepalive：跳过 tsc，直接运行引擎

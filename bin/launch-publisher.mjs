@@ -42,6 +42,53 @@ const bunPath = process.env.WECHAT_BUN_PATH || (fs.existsSync(localBun) ? localB
 const batchScript = path.join(repoRoot, 'scripts', 'batch-fast-wechat.ts');
 const args = process.argv.slice(2).map(arg => arg === '--check' ? '--dry-run' : arg);
 
+// 磁盘预检：磁盘写满会连锁导致同步 ENOSPC、页面资源加载失败、重开复验 JS 异常。
+// 只在低于阈值时清理本工具自己的过期临时目录；仍不足则明确退出，绝不硬着头皮半批写入。
+function freeBytes(dir) {
+  try {
+    const stat = fs.statfsSync(dir);
+    return Number(stat.bavail) * Number(stat.bsize);
+  } catch {
+    return null;
+  }
+}
+
+function cleanupOwnStaleTemp(tempDir, minBytes) {
+  const before = freeBytes(tempDir);
+  if (before === null || before >= minBytes) return;
+  const cutoff = Date.now() - 24 * 3600 * 1000;
+  try {
+    for (const entry of fs.readdirSync(tempDir)) {
+      if (!/^zcode-bash-/i.test(entry)) continue;
+      const full = path.join(tempDir, entry);
+      try {
+        if (fs.statSync(full).mtimeMs < cutoff) fs.rmSync(full, { recursive: true, force: true });
+      } catch {}
+    }
+  } catch {}
+}
+
+const minFreeMb = Number(process.env.WECHAT_MIN_FREE_MB || 300);
+const minFreeBytes = Number.isFinite(minFreeMb) ? Math.max(0, minFreeMb) * 1024 * 1024 : 300 * 1024 * 1024;
+const tempDir = process.env.TEMP || process.env.TMP || os.tmpdir();
+const keepaliveOnly = args.length === 1 && args[0] === '--keepalive';
+cleanupOwnStaleTemp(tempDir, minFreeBytes);
+if (!keepaliveOnly) {
+  for (const [label, dir] of [['仓库盘', repoRoot], ['临时盘', tempDir]]) {
+    const free = freeBytes(dir);
+    if (free !== null && free < minFreeBytes) {
+      console.error(
+        `[wechat-launcher] ❌ ${label}空间不足：${dir} 仅剩 ${(free / 1024 / 1024).toFixed(0)}MB，` +
+        `低于 ${minFreeMb}MB 安全线。请清理磁盘，或把 TEMP/TMP 指向有空间的盘（例如 D:\\Temp\\zcode）后重试。`
+      );
+      process.exit(2);
+    }
+    if (free !== null) {
+      console.log(`[wechat-launcher] ${label}可用空间: ${(free / 1024 / 1024).toFixed(0)}MB`);
+    }
+  }
+}
+
 function run(executable, childArgs) {
   return new Promise(resolve => {
     const child = spawn(executable, childArgs, { cwd: repoRoot, stdio: 'inherit', env: process.env });
