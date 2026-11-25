@@ -687,6 +687,8 @@ export async function connectOrCreateHomeSession(options: HomeSessionOptions = {
       [
         `--remote-debugging-port=${freePort}`,
         `--user-data-dir=${profileDir}`,
+        // 浏览器磁盘缓存可外置，避免 C: 盘紧张时拖垮保存与重开复验。
+        ...(process.env.WECHAT_BROWSER_CACHE_DIR ? [`--disk-cache-dir=${process.env.WECHAT_BROWSER_CACHE_DIR}`] : []),
         '--disable-blink-features=AutomationControlled',
         '--start-maximized',
         '--no-first-run',
