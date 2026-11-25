@@ -7,7 +7,7 @@
 
 | # | 症状 | 直接原因 | 根因分类 | 已落地的修复 |
 |---|---|---|---|---|
-| 1 | 文档承诺“扫一次管一个月 / 96 小时滑动”，实际约 2 天就掉线 | 把一次 Cookie 到期时间观测当成平台承诺；保活当时并未被调度 | R2 一次性观测写成长期承诺；R4 调度缺口 | 删除 96h/月承诺；加入每小时 keepalive；实测 Cookie `Max-Age≈4 天` |
+| 1 | 文档承诺“扫一次管一个月 / 96 小时滑动”，实际约 2 天就掉线 | 把一次 Cookie 到期时间观测当成平台承诺；保活当时并未被调度 | R2 一次性观测写成长期承诺；R4 调度缺口 | 删除 96h/月承诺；加入每小时 keepalive；**实测会话 Cookie `Max-Age` 固定 96.0h，访问首页/图文列表/发表记录均不顺延**；新增只读 `session-expiry.mjs` 报告剩余时间 |
 | 2 | 明明已登录，keepalive 连续多轮报 `needs-qr`，整批稿被阻塞 | 页内 `fetch('/cgi-bin/home')` 不带 token/Referer 被服务端判“登录超时”；旧判定把该响应当扫码证据 | R1 用代理信号代替真实路径 | 改为“任务自有新标签真实导航 + 读取最终 path/token/菜单/登录框”；`mpqrconnect` 也判登录页 |
 | 3 | keepalive 报 `unknown`，错误却是 `Runtime.evaluate` 超时 | 复用的首页标签被浏览器冻结 | R4 生命周期未纳入契约 | 冻结时改用新标签探测；后来又统一为导航探测 |
 | 4 | 浏览器重启后 keepalive 报 `unknown`，`ECONNREFUSED`，但手工 `curl`/Node 正常 | 系统 `HTTP_PROXY/ALL_PROXY` 指向未运行的 Clash；Bun 的 fetch 强制走代理，本地 CDP 被送去代理 | R4 环境变量未纳入契约 | 启动器强制把 `127.0.0.1/localhost/::1` 加进 `NO_PROXY`（提交 `66aec19`） |

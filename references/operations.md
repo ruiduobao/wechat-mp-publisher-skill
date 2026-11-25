@@ -125,7 +125,14 @@ node bin/launch-publisher.mjs --titles "C:/private/titles-override.json"
 
 登录失效时报告需要续期；模型服务商拒绝子 agent 请求与公众号登录失败是两件不同的事。
 
-微信公众号后台的会话期限由平台控制，本项目无法保证保活能顺延固定小时数、天数或月数。实测平台下发的 `slave_sid`/`data_ticket` 等会话 Cookie 的 `Max-Age` 约为 4 天，且新登录（含在其它浏览器登录同一账号）可能让旧 Web 会话提前失效；因此“扫一次管一个月”不成立。`--keepalive` 路径不读取 Cookie；只有普通发布路径的会话守卫会通过 CDP 读取 Cookie 的名称/域等元数据来确认 `slave_sid` 是否存在，且不记录、不导出、不打印任何 Cookie 值。`--keepalive` 只会开一个任务自有标签正常访问一次官方后台首页，读取最终路径、是否带 token 与页面结构标记后立即关闭该标签（不扫描、不建稿、不改稿、不动用户标签）：
+微信公众号后台的会话期限由平台控制，本项目无法保证保活能顺延固定小时数、天数或月数。**实测（2026-11-25）**：平台签发的 `slave_sid`、`data_ticket`、`bizuin`、`slave_bizuin`、`data_bizuin` 的 `Max-Age` 固定为 **96 小时（4 天）**；访问首页、图文列表、发表记录均**不会顺延**到期时间（同一时刻三次读取均为 96.0h 不变）。因此一次扫码的有效期就是约 4 天，与是否每小时保活无关。普通 Chrome “一直不掉”通常是因为浏览器长期不关闭、`uuid` 会话 Cookie 一直存活，或用户在打开时触发了快捷登录；平台并未给它更长的 Cookie。查询剩余时间用只读工具：
+
+```bash
+node scripts/session-expiry.mjs
+# 输出各会话 Cookie 的剩余小时数（不输出任何 Cookie 值）与预计失效时间
+```
+
+`--keepalive` 路径不读取 Cookie；只有普通发布路径的会话守卫会通过 CDP 读取 Cookie 的名称/域等元数据来确认 `slave_sid` 是否存在，且不记录、不导出、不打印任何 Cookie 值。`--keepalive` 只会开一个任务自有标签正常访问一次官方后台首页，读取最终路径、是否带 token 与页面结构标记后立即关闭该标签（不扫描、不建稿、不改稿、不动用户标签）：
 
 ```bash
 bun run keepalive
