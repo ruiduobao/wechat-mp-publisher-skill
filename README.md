@@ -184,7 +184,7 @@ node bin/launch-publisher.mjs --help
 | [`scripts/private-json.mjs`](scripts/private-json.mjs) | 私有状态 JSON 安全编辑（解析→校验→原子替换；内容修正登记） |
 | [`scripts/verify-doi-official.mjs`](scripts/verify-doi-official.mjs) | DOI 官网二次核验（Crossref 元数据 + doi.org Handle + 标题相似度） |
 | [`scripts/keepalive-report.mjs`](scripts/keepalive-report.mjs) | 登录态时间线报告（读取私有遥测，定位掉线与误报） |
-| [`scripts/session-expiry.mjs`](scripts/session-expiry.mjs) | 会话 Cookie 剩余时间诊断（只读、不输出 Cookie 值；实测固定 96h） |
+| [`scripts/session-expiry.mjs`](scripts/session-expiry.mjs) | 会话 Cookie 剩余时间诊断（只读、不输出 Cookie 值；96h 窗口，根路径访问会刷新） |
 | [`.env.example`](.env.example) | 环境变量配置模板（复制为 `.env` 即可快速定制你的账号与目录） |
 | [`references/`](references/operations.md) | 详细操作手册、故障排查、配置说明、独立测试矩阵与验证记录；事故根因见 [`lessons-learned.md`](references/lessons-learned.md) |
 | [`NOTICE`](NOTICE) / [`LICENSE`](LICENSE) | MIT 开源协议及上游归属声明 |

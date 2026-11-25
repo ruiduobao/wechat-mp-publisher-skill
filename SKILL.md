@@ -97,7 +97,7 @@ node bin/launch-publisher.mjs --titles "C:/Users/Administrator/.agents/skills/we
 # 专用浏览器端口无响应时会自动只重启专用 Profile；如要禁用自动重启：WECHAT_NO_BROWSER_AUTORESTART=1
 # 历史时间线：node scripts/keepalive-report.mjs 7
 # 登录态剩余时间（只读、不输出 Cookie 值）：node scripts/session-expiry.mjs
-# 实测会话 Cookie Max-Age 固定 96 小时，页面访问不会顺延；到期需人工在专用窗口扫码
+# 实测 Cookie Max-Age=96h，打开官方根路径会刷新为“当前+96h”；服务端仍可随时撤销会话
 node bin/launch-publisher.mjs --keepalive
 ```
 

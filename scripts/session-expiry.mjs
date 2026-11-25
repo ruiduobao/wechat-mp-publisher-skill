@@ -12,8 +12,8 @@
  *   4 = 专用浏览器未运行 / CDP 不可用（unknown，不要误报成需要扫码）
  *   5 = 未发现微信会话 Cookie（needs-qr）
  *
- * 说明: 微信会话 Cookie（slave_sid/data_ticket/bizuin 等）由平台签发，
- * 实测 Max-Age 固定约 96 小时，页面访问不会顺延；本工具只报告剩余时间。
+ * 说明: 微信会话 Cookie 的 Max-Age 为 96 小时；打开官方根路径会刷新为“当前+96h”，
+ * 但服务端仍可随时撤销会话（并行登录/风控）。本工具只报告剩余时间，不做续期。
  */
 import { execFileSync } from 'node:child_process';
 import process from 'node:process';
