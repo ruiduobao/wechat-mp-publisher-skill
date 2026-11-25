@@ -1,16 +1,24 @@
-# 每隔 3 小时从 GitHub 拉取并更新草稿
+# 每隔 1 小时从 GitHub 拉取、保活并更新草稿
 
-本机已配置每 3 小时一次的定时任务（`scheduleRule: hourly / 3`，分钟位 `10`）。推文生产端把 `*_本地版.md` 与 `images/**` 推送到私有仓库 `ruiduobao/zimeiti-sync`；本机任务**先拉取**、再核查、拉到新文就**立即**保存公众号草稿。Z: 本地独立生成源保持独立。
+本机已配置每 1 小时一次的定时任务（`scheduleRule: hourly / 1`，分钟位 `10`）。推文生产端把 `*_本地版.md` 与 `images/**` 推送到私有仓库 `ruiduobao/zimeiti-sync`；本机任务**先拉取**、再核查、拉到新文就**立即**保存公众号草稿。Z: 本地独立生成源保持独立。
 
-任务先读取当前代码库 `SKILL.md` 和本说明，再执行增量拉取、只读预检与前置真实性核查：
+任务先读取当前代码库 `SKILL.md` 和本说明，再执行增量拉取、登录态探测与只读预检：
 
 ```bash
 # 1) 增量拉取私有仓库到本地镜像（仅 *_本地版.md 与 images/**；令牌读私有 .env）
 node "C:/Users/Administrator/wechat-mp-publisher-skill/scripts/sync-from-github.mjs"
 
-# 2) 只读预检 + 在线真实性核查
+# 2) 轻量登录态探测（真实导航；healthy / needs-qr / unknown，退出码 0/3/4）
+node "C:/Users/Administrator/wechat-mp-publisher-skill/bin/launch-publisher.mjs" --keepalive
+
+# 3) 会话到期诊断（只读 Cookie 元数据；不足 24 小时退出码 3，提醒扫码）
+node "C:/Users/Administrator/wechat-mp-publisher-skill/scripts/session-expiry.mjs"
+
+# 4) 只读预检 + 在线真实性核查
 node "C:/Users/Administrator/wechat-mp-publisher-skill/bin/launch-publisher.mjs" --check --verify
 ```
+
+`session-expiry.mjs` 的退出码：0 正常；3 即将到期（必须在本轮报告显著提示）；4 浏览器未运行/CDP 不可用（unknown，不要提示扫码）；5 未登录（needs-qr）。它只输出 Cookie 名称与剩余小时，绝不输出 Cookie 值。**巡检报告固定包含四项：`keepalive-status`、会话剩余小时、磁盘剩余、待处理篇数**；缺一项不算完整巡检。
 
 拉取失败（网络/TLS/鉴权）必须如实报告并停止，**不得**把拉取失败当作“没有新推文”。预检与核查纯读，不建锁、不写历史/基线、不触碰浏览器。没有可执行工作就退出。
 

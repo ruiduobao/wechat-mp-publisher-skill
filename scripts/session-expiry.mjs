@@ -1,10 +1,16 @@
 #!/usr/bin/env node
 /**
  * 登录态到期诊断（只读）：读取专用浏览器中 weixin.qq.com 的 Cookie 名称与到期时间，
- * 绝不输出 Cookie 值。用于回答“还能撑多久、为什么又掉了”。
+ * 绝不输出 Cookie 值。用于回答“还能撑多久、为什么又掉了”，并供每小时巡检自动提醒。
  *
  * 用法:
- *   node scripts/session-expiry.mjs
+ *   node scripts/session-expiry.mjs [--warn-hours 24] [--json]
+ *
+ * 退出码:
+ *   0 = 正常，剩余时间 >= 阈值
+ *   3 = 即将到期（剩余 < 阈值），需要安排扫码
+ *   4 = 专用浏览器未运行 / CDP 不可用（unknown，不要误报成需要扫码）
+ *   5 = 未发现微信会话 Cookie（needs-qr）
  *
  * 说明: 微信会话 Cookie（slave_sid/data_ticket/bizuin 等）由平台签发，
  * 实测 Max-Age 固定约 96 小时，页面访问不会顺延；本工具只报告剩余时间。
@@ -14,6 +20,12 @@ import process from 'node:process';
 
 const PROFILE_DIR = process.env.WECHAT_BROWSER_PROFILE_DIR
   || 'C:\\Users\\Administrator\\AppData\\Roaming\\baoyu-skills\\chrome-profile';
+
+const args = process.argv.slice(2);
+const warnIndex = args.indexOf('--warn-hours');
+const warnHours = warnIndex >= 0 ? Number(args[warnIndex + 1]) : 24;
+const jsonOutput = args.includes('--json');
+const thresholdHours = Number.isFinite(warnHours) ? Math.max(0, warnHours) : 24;
 
 function findDebugPort() {
   const script = [
@@ -32,13 +44,37 @@ function findDebugPort() {
   return Number.isFinite(port) ? port : null;
 }
 
-const port = findDebugPort();
-if (!port) {
-  console.log('专用浏览器未运行，无法读取登录态到期时间。');
-  process.exit(2);
+function emit(result) {
+  if (jsonOutput) {
+    console.log(JSON.stringify(result));
+    return;
+  }
+  const { status, hours, expiresAt, rows } = result;
+  for (const row of rows || []) {
+    console.log(`${row.name}: ${row.session ? '会话 Cookie（关浏览器即失效）' : `剩余 ${row.hours.toFixed(1)} 小时（约 ${(row.hours / 24).toFixed(1)} 天）`}`);
+  }
+  console.log(`session-expiry-status=${status}${Number.isFinite(hours) ? ` hours=${hours.toFixed(1)}` : ''}`);
+  if (expiresAt) console.log(`预计最早失效: ${expiresAt}`);
+  if (status === 'expiring') console.log(`⚠️ 登录态剩余不足 ${thresholdHours} 小时，请尽快在专用 Baoyu Profile 窗口扫码。`);
+  else if (status === 'ok') console.log('✅ 暂不需要扫码。');
+  else if (status === 'needs-qr') console.log('⚠️ 当前未登录，请在专用 Baoyu Profile 窗口扫码。');
+  else console.log('ℹ️ 无法确认登录态（浏览器未运行或 CDP 不可用），不要据此提示扫码。');
 }
 
-const version = await fetch(`http://127.0.0.1:${port}/json/version`).then(r => r.json());
+const port = findDebugPort();
+if (!port) {
+  emit({ status: 'unknown', hours: NaN, expiresAt: null, rows: [] });
+  process.exit(4);
+}
+
+let version;
+try {
+  version = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(8_000) }).then(r => r.json());
+} catch {
+  emit({ status: 'unknown', hours: NaN, expiresAt: null, rows: [] });
+  process.exit(4);
+}
+
 const ws = new WebSocket(version.webSocketDebuggerUrl);
 let id = 0;
 const pending = new Map();
@@ -57,12 +93,27 @@ ws.addEventListener('message', ev => {
     msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result);
   }
 });
-await new Promise((resolve, reject) => {
-  ws.addEventListener('open', resolve, { once: true });
-  ws.addEventListener('error', () => reject(new Error('CDP WebSocket 连接失败')), { once: true });
-});
+try {
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve, { once: true });
+    ws.addEventListener('error', () => reject(new Error('CDP WebSocket 连接失败')), { once: true });
+    setTimeout(() => reject(new Error('CDP WebSocket 连接超时')), 8_000);
+  });
+} catch {
+  emit({ status: 'unknown', hours: NaN, expiresAt: null, rows: [] });
+  process.exit(4);
+}
 
-const snap = await send('Storage.getCookies', {});
+let snap;
+try {
+  snap = await send('Storage.getCookies', {});
+} catch {
+  emit({ status: 'unknown', hours: NaN, expiresAt: null, rows: [] });
+  process.exit(4);
+} finally {
+  try { ws.close(); } catch {}
+}
+
 const now = Date.now() / 1000;
 const interesting = ['slave_sid', 'data_ticket', 'bizuin', 'slave_bizuin', 'data_bizuin'];
 const rows = (snap.cookies || [])
@@ -70,14 +121,16 @@ const rows = (snap.cookies || [])
   .map(c => ({ name: c.name, hours: (c.expires - now) / 3600, session: c.session }));
 
 if (rows.length === 0) {
-  console.log('未发现微信会话 Cookie，当前应为未登录状态（needs-qr）。');
-  process.exit(3);
+  emit({ status: 'needs-qr', hours: NaN, expiresAt: null, rows: [] });
+  process.exit(5);
 }
-const minHours = Math.min(...rows.filter(r => !r.session).map(r => r.hours));
-for (const row of rows) {
-  console.log(`${row.name}: ${row.session ? '会话 Cookie（关浏览器即失效）' : `剩余 ${row.hours.toFixed(1)} 小时（约 ${(row.hours / 24).toFixed(1)} 天）`}`);
-}
-console.log(`\n预计最早失效: ${new Date((now + minHours * 3600) * 1000).toLocaleString('zh-CN', { hour12: false })}`);
-console.log(minHours < 24 ? '⚠️ 不足 24 小时，请安排在专用窗口扫码。' : '✅ 暂不需要扫码。');
-ws.close();
-process.exit(0);
+const persistent = rows.filter(r => !r.session);
+const minHours = persistent.length ? Math.min(...persistent.map(r => r.hours)) : NaN;
+const status = !Number.isFinite(minHours) || minHours <= 0 ? 'needs-qr' : minHours < thresholdHours ? 'expiring' : 'ok';
+emit({
+  status,
+  hours: minHours,
+  expiresAt: Number.isFinite(minHours) ? new Date((now + minHours * 3600) * 1000).toLocaleString('zh-CN', { hour12: false }) : null,
+  rows,
+});
+process.exit(status === 'expiring' ? 3 : status === 'needs-qr' ? 5 : 0);

@@ -130,6 +130,8 @@ node bin/launch-publisher.mjs --titles "C:/private/titles-override.json"
 ```bash
 node scripts/session-expiry.mjs
 # 输出各会话 Cookie 的剩余小时数（不输出任何 Cookie 值）与预计失效时间
+# 退出码: 0 正常；3 剩余不足 24 小时（需安排扫码）；4 浏览器未运行/CDP 不可用；5 未登录
+# 每小时巡检必须同时报告：keepalive-status、会话剩余小时、磁盘剩余、待处理篇数
 ```
 
 `--keepalive` 路径不读取 Cookie；只有普通发布路径的会话守卫会通过 CDP 读取 Cookie 的名称/域等元数据来确认 `slave_sid` 是否存在，且不记录、不导出、不打印任何 Cookie 值。`--keepalive` 只会开一个任务自有标签正常访问一次官方后台首页，读取最终路径、是否带 token 与页面结构标记后立即关闭该标签（不扫描、不建稿、不改稿、不动用户标签）：
