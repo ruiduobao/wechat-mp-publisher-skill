@@ -18,6 +18,12 @@
 import { execFileSync } from 'node:child_process';
 import process from 'node:process';
 
+// 本地 CDP 绝不能走代理：某些环境会开启 NODE_USE_ENV_PROXY 让 fetch 读取 HTTP_PROXY。
+const noProxy = new Set(String(process.env.NO_PROXY || process.env.no_proxy || '').split(',').map(v => v.trim()).filter(Boolean));
+for (const host of ['127.0.0.1', 'localhost', '::1']) noProxy.add(host);
+process.env.NO_PROXY = [...noProxy].join(',');
+process.env.no_proxy = process.env.NO_PROXY;
+
 const PROFILE_DIR = process.env.WECHAT_BROWSER_PROFILE_DIR
   || 'C:\\Users\\Administrator\\AppData\\Roaming\\baoyu-skills\\chrome-profile';
 
