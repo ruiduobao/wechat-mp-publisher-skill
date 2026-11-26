@@ -7,6 +7,8 @@ description: 保存或更新微信公众号普通长文草稿，包含 Markdown 
 
 本机权威代码库为 `C:\Users\Administrator\wechat-mp-publisher-skill`，唯一入口为 `bin/launch-publisher.mjs`。两处已安装同名技能链接到该代码库；不要复制另一套扫描器和状态库。更换设备时先读 [configuration.md](references/configuration.md) 核对本机路径和私有依赖。
 
+**交接给全新 Agent 时，先让它完整阅读 [handoff-prompt.md](references/handoff-prompt.md)**：那里有固定流程、判断矩阵、十条硬规则、状态语义、报告模板与禁止事项。不要凭记忆或旧会话数字直接开跑。
+
 ## 先核查，再检查，后编辑
 
 1. 读取 [operations.md](references/operations.md) 与实际 CLI 帮助。定时任务同时读 [cron-scheduling-prompt.md](references/cron-scheduling-prompt.md)。
