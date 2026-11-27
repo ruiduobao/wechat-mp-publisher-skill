@@ -38,6 +38,7 @@ import {
   verifyImagesIntegrity,
   getOrCreateLegacyBaseline,
   getStatePaths,
+  loadHistoryDatabase,
   CURRENT_FEATURE_VERSION,
   type DraftStateRecord,
 } from './draft-state.ts';
@@ -913,6 +914,41 @@ export function isTransientPublishFailure(message?: string): boolean {
   if (!text) return false;
   if (/needs-title|needs-cover|needs-attention|占位符|未定位|真实性|核查|标题/i.test(text)) return false;
   return /封面|cover background image|cdn 图片就绪超时|图片上传就绪失败|cloneNode|timeout|超时|execution exception/i.test(text);
+}
+
+/**
+ * 同一篇文章可能以不同路径/批次再次出现（例如同步源改名后重推）。
+ * 对“准备新建”的候选，若其完整内容指纹与某个已确立记录完全一致，则视为重复，
+ * 返回 candidateId -> existingId，避免创建第二份草稿。
+ */
+export function findDuplicateCreateIds(
+  candidates: DraftStateRecord[],
+  history: Record<string, DraftStateRecord>,
+  options: BatchCliOptions,
+  legacyBaseline: Set<string>
+): Map<string, string> {
+  const duplicates = new Map<string, string>();
+  if (options.id) return duplicates; // 显式单篇允许人工强制处理
+  // 指纹中的 imageHash 含绝对路径，换挂载目录后会不同；重复判定改用
+  // “正文内容哈希 + 逐图 sha256 顺序”，忽略路径与 mtime。
+  const contentSignature = (fp?: DraftStateRecord['observedFingerprint']): string | null => {
+    if (!fp) return null;
+    const shas = (fp.images || []).map(img => img.sha256 || 'missing').join(',');
+    return `${fp.contentHash}|${shas}`;
+  };
+  const establishedBySignature = new Map<string, string>();
+  for (const [id, record] of Object.entries(history)) {
+    const signature = contentSignature(record.observedFingerprint);
+    if (signature && record.appmsgid && record.verification?.verified) establishedBySignature.set(signature, id);
+  }
+  for (const candidate of candidates) {
+    if (planArticleAction(candidate, options, legacyBaseline).action !== 'create') continue;
+    const signature = contentSignature(candidate.observedFingerprint);
+    if (!signature) continue;
+    const existing = establishedBySignature.get(signature);
+    if (existing && existing !== candidate.id) duplicates.set(candidate.id, existing);
+  }
+  return duplicates;
 }
 
 export function collectNewArticleTitleProblems(
@@ -1901,6 +1937,15 @@ export async function runBatchPipeline(options: BatchCliOptions = parseBatchArgs
 
     if (!options.latest) {
       candidates.sort((a, b) => a.id.localeCompare(b.id));
+    }
+
+    // 同一篇文章换路径/批次重推时，按完整内容指纹识别重复，绝不创建第二份草稿。
+    const duplicates = findDuplicateCreateIds(candidates, loadHistoryDatabase(), options, legacyBaseline);
+    if (duplicates.size > 0) {
+      for (const [candidateId, existingId] of duplicates) {
+        console.log(`[wechat-batch] ℹ️ 跳过重复内容 [${candidateId}]：与已确立的 ${existingId} 完整内容指纹一致`);
+      }
+      candidates = candidates.filter(item => !duplicates.has(item.id));
     }
 
     if (options.limit && options.limit > 0) {

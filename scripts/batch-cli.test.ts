@@ -12,6 +12,7 @@ import { mergeShortTitles } from './set-titles.ts';
 import {
   classifyKeepaliveObservation,
   collectNewArticleTitleProblems,
+  findDuplicateCreateIds,
   isOfficialHomeTargetUrl,
   isTransientPublishFailure,
   observeKeepalivePage,
@@ -482,6 +483,48 @@ test('keepalive 首页标签被冻结时改用新标签复核，不把 needs-qr 
   expect(stillBroken.code).toBe(4);
   expect(stillBroken.output).toContain('keepalive-status=unknown');
   expect(stillBroken.output).not.toContain('扫码');
+});
+
+test('重复内容防重: 新路径与已确立稿件指纹一致时跳过新建', () => {
+  const makeCandidate = (id: string, contentHash: string, imagePath: string) => ({
+    id, file: `${id}.md`, title: '同一篇文章', source: 'muse', batch: '20261127_1845',
+    observedFingerprint: {
+      compositeHash: `${contentHash}-${imagePath}`,
+      contentHash,
+      imageHash: imagePath,
+      images: [{ path: imagePath, sha256: 'IMG-A' }],
+    },
+  }) as any;
+  const history = {
+    'local:20261127_1845:01': {
+      id: 'local:20261127_1845:01', appmsgid: '100024023', verification: { verified: true },
+      observedFingerprint: {
+        compositeHash: 'HASH-A-Z',
+        contentHash: 'TEXT-A',
+        imageHash: 'Z:\\自媒体\\images\\fig1.jpg',
+        images: [{ path: 'Z:\\自媒体\\images\\fig1.jpg', sha256: 'IMG-A' }],
+      },
+    },
+  } as any;
+
+  const dup = findDuplicateCreateIds(
+    [
+      makeCandidate('muse:20261127_1845:01', 'TEXT-A', 'C:\\mirror\\images\\fig1.jpg'),
+      makeCandidate('muse:20261127_1900:01', 'TEXT-B', 'C:\\mirror\\images\\fig1.jpg'),
+    ],
+    history,
+    {} as any,
+    new Set<string>()
+  );
+  expect([...dup.entries()]).toEqual([['muse:20261127_1845:01', 'local:20261127_1845:01']]);
+
+  const forced = findDuplicateCreateIds(
+    [makeCandidate('muse:20261127_1845:01', 'TEXT-A', 'C:\\mirror\\images\\fig1.jpg')],
+    history,
+    { id: 'muse:20261127_1845:01' } as any,
+    new Set<string>()
+  );
+  expect(forced.size).toBe(0);
 });
 
 test('瞬时故障分类: 封面/CDN/页面加载超时才重试，内容与流程错误不重试', () => {
